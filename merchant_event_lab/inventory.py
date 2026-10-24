@@ -4,6 +4,9 @@ import sqlite3
 from pathlib import Path
 
 
+MAX_STOCK = 2**63 - 1
+
+
 class InventoryStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -24,8 +27,12 @@ class InventoryStore:
             raise ValueError("event_id must be a non-empty string")
         if not isinstance(sku, str) or not sku.strip():
             raise ValueError("sku must be a non-empty string")
-        if type(delta) is not int or delta == 0:
-            raise ValueError("delta must be a non-zero integer")
+        if (
+            type(delta) is not int
+            or delta == 0
+            or not -(2**63) <= delta <= MAX_STOCK
+        ):
+            raise ValueError("delta must be a non-zero signed 64-bit integer")
 
         with sqlite3.connect(self.path, timeout=10) as db:
             db.execute("BEGIN IMMEDIATE")
@@ -41,6 +48,8 @@ class InventoryStore:
             ).fetchone()[0]
             if current + delta < 0:
                 raise ValueError("insufficient stock")
+            if current + delta > MAX_STOCK:
+                raise ValueError("stock limit exceeded")
             db.execute(
                 "INSERT INTO events (event_id, sku, delta) VALUES (?, ?, ?)",
                 (event_id, sku, delta),

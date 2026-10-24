@@ -1,8 +1,9 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from merchant_event_lab.inventory import InventoryStore
+from merchant_event_lab.inventory import MAX_STOCK, InventoryStore
 
 
 class InventoryStoreTests(unittest.TestCase):
@@ -31,11 +32,37 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(self.store.stock("sku-a"), 1)
 
     def test_invalid_inputs_do_not_create_events(self):
-        for event_id, sku, delta in [("", "sku-a", 1), ("evt-1", "", 1), ("evt-1", "sku-a", 0), ("evt-1", "sku-a", True)]:
+        invalid = [
+            ("", "sku-a", 1),
+            ("evt-1", "", 1),
+            ("evt-1", "sku-a", 0),
+            ("evt-1", "sku-a", True),
+            ("evt-1", "sku-a", MAX_STOCK + 1),
+            ("evt-1", "sku-a", -(2**63) - 1),
+        ]
+        for event_id, sku, delta in invalid:
             with self.subTest(event_id=event_id, sku=sku, delta=delta):
                 with self.assertRaises(ValueError):
                     self.store.apply(event_id, sku, delta)
         self.assertEqual(self.store.stock("sku-a"), 0)
+
+    def test_stock_overflow_rolls_back_event(self):
+        self.store.apply("restock-max", "sku-a", MAX_STOCK)
+        with self.assertRaisesRegex(ValueError, "stock limit exceeded"):
+            self.store.apply("overflow", "sku-a", 1)
+
+        self.assertEqual(self.store.stock("sku-a"), MAX_STOCK)
+        self.assertTrue(self.store.apply("overflow", "sku-b", 1))
+
+    def test_concurrent_writers_do_not_lose_updates(self):
+        def apply(index):
+            return InventoryStore(self.db).apply(f"evt-{index}", "sku-a", 1)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(apply, range(16)))
+
+        self.assertEqual(results, [True] * 16)
+        self.assertEqual(self.store.stock("sku-a"), 16)
 
 
 if __name__ == "__main__":
