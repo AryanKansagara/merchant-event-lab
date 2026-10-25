@@ -16,6 +16,22 @@ store.apply("sale-001", "demo-sku", -2)     # True
 assert store.stock("demo-sku") == 3
 ```
 
+An operational read model provides deterministic keyset pagination over current
+SKU positions. It can also select low-stock and zero-stock positions for a
+replenishment view without exposing raw event rows:
+
+```python
+page = store.inventory_page(limit=100, low_stock_at=5)
+for position in page.items:
+    print(position.sku, position.stock)
+
+if page.next_cursor is not None:
+    next_page = store.inventory_page(limit=100, after_sku=page.next_cursor)
+```
+
+A page is read-consistent, but separate pages are not a database snapshot when
+writes happen between requests.
+
 Run tests with `python3 -m unittest discover -s tests -v`. Python standard library only.
 
 `SignedEventIngestor` provides an HTTP-framework-agnostic boundary for synthetic
@@ -35,5 +51,5 @@ The signature header contract is `sha256=<hex digest>`. Real transport adapters
 must retain the raw bytes and use TLS. Exact signed replays are safe because the
 event store is idempotent; this prototype does not provide time-based replay
 expiry or secret rotation. It is not yet a webhook server or production
-inventory system. Future slices can add an HTTP adapter, secret rotation,
-operational read model, and broader failure/concurrency tests.
+inventory system. Future slices can add an HTTP adapter, secret rotation, and
+broader failure/concurrency tests.

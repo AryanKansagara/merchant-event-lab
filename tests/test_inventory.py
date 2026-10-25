@@ -3,7 +3,11 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from merchant_event_lab.inventory import MAX_STOCK, InventoryStore
+from merchant_event_lab.inventory import (
+    MAX_STOCK,
+    InventoryPosition,
+    InventoryStore,
+)
 
 
 class InventoryStoreTests(unittest.TestCase):
@@ -63,6 +67,61 @@ class InventoryStoreTests(unittest.TestCase):
 
         self.assertEqual(results, [True] * 16)
         self.assertEqual(self.store.stock("sku-a"), 16)
+
+    def test_inventory_page_is_ordered_and_uses_keyset_cursor(self):
+        for event_id, sku, delta in [
+            ("restock-c", "sku-c", 3),
+            ("restock-a", "sku-a", 1),
+            ("restock-b", "sku-b", 2),
+        ]:
+            self.store.apply(event_id, sku, delta)
+
+        first = self.store.inventory_page(limit=2)
+        self.assertEqual(
+            first.items,
+            (
+                InventoryPosition("sku-a", 1),
+                InventoryPosition("sku-b", 2),
+            ),
+        )
+        self.assertEqual(first.next_cursor, "sku-b")
+
+        second = self.store.inventory_page(limit=2, after_sku=first.next_cursor)
+        self.assertEqual(second.items, (InventoryPosition("sku-c", 3),))
+        self.assertIsNone(second.next_cursor)
+
+    def test_low_stock_page_includes_zero_stock_positions(self):
+        self.store.apply("restock-a", "sku-a", 3)
+        self.store.apply("sale-a", "sku-a", -3)
+        self.store.apply("restock-b", "sku-b", 2)
+        self.store.apply("restock-c", "sku-c", 4)
+
+        first = self.store.inventory_page(limit=1, low_stock_at=2)
+        self.assertEqual(first.items, (InventoryPosition("sku-a", 0),))
+        self.assertEqual(first.next_cursor, "sku-a")
+
+        second = self.store.inventory_page(
+            limit=1,
+            low_stock_at=2,
+            after_sku=first.next_cursor,
+        )
+        self.assertEqual(second.items, (InventoryPosition("sku-b", 2),))
+        self.assertIsNone(second.next_cursor)
+
+    def test_inventory_page_rejects_invalid_options(self):
+        invalid_options = [
+            {"limit": 0},
+            {"limit": 1001},
+            {"limit": True},
+            {"after_sku": ""},
+            {"low_stock_at": -1},
+            {"low_stock_at": True},
+            {"low_stock_at": MAX_STOCK + 1},
+        ]
+        for options in invalid_options:
+            with self.subTest(options=options):
+                with self.assertRaises(ValueError):
+                    self.store.inventory_page(**options)
 
 
 if __name__ == "__main__":
