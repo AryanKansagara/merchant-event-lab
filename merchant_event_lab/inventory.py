@@ -1,10 +1,27 @@
 """Persistent, idempotent inventory event ledger (integer units only)."""
 
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 
 MAX_STOCK = 2**63 - 1
+
+
+@dataclass(frozen=True)
+class InventoryPosition:
+    """Current stock for one SKU."""
+
+    sku: str
+    stock: int
+
+
+@dataclass(frozen=True)
+class InventoryPage:
+    """A deterministic keyset-paginated inventory page."""
+
+    items: tuple[InventoryPosition, ...]
+    next_cursor: str | None
 
 
 class InventoryStore:
@@ -61,3 +78,61 @@ class InventoryStore:
             return db.execute(
                 "SELECT COALESCE(SUM(delta), 0) FROM events WHERE sku = ?", (sku,)
             ).fetchone()[0]
+
+    def inventory_page(
+        self,
+        *,
+        limit: int = 100,
+        after_sku: str | None = None,
+        low_stock_at: int | None = None,
+    ) -> InventoryPage:
+        """Return current positions ordered by SKU using keyset pagination.
+
+        ``after_sku`` is the ``next_cursor`` from a previous page. When
+        ``low_stock_at`` is provided, only positions at or below that stock
+        level are returned. SKUs with zero stock remain visible because they
+        have event history and may need replenishment.
+        """
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("limit must be an integer from 1 to 1000")
+        if after_sku is not None and (
+            not isinstance(after_sku, str) or not after_sku.strip()
+        ):
+            raise ValueError("after_sku must be a non-empty string")
+        if low_stock_at is not None and (
+            type(low_stock_at) is not int or not 0 <= low_stock_at <= MAX_STOCK
+        ):
+            raise ValueError("low_stock_at must be a non-negative 64-bit integer")
+
+        filters: list[str] = []
+        parameters: list[str | int] = []
+        if after_sku is not None:
+            filters.append("sku > ?")
+            parameters.append(after_sku)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+
+        having = ""
+        if low_stock_at is not None:
+            having = "HAVING SUM(delta) <= ?"
+            parameters.append(low_stock_at)
+        parameters.append(limit + 1)
+
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                f"""SELECT sku, SUM(delta) AS stock
+                    FROM events
+                    {where}
+                    GROUP BY sku
+                    {having}
+                    ORDER BY sku
+                    LIMIT ?""",
+                parameters,
+            ).fetchall()
+
+        has_more = len(rows) > limit
+        visible_rows = rows[:limit]
+        items = tuple(InventoryPosition(sku, stock) for sku, stock in visible_rows)
+        return InventoryPage(
+            items=items,
+            next_cursor=items[-1].sku if has_more else None,
+        )
