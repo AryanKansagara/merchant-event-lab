@@ -47,9 +47,40 @@ ingestor = SignedEventIngestor(store, b"load-this-from-a-secret-manager")
 applied = ingestor.ingest(raw_request_body, signature_header)
 ```
 
-The signature header contract is `sha256=<hex digest>`. Real transport adapters
-must retain the raw bytes and use TLS. Exact signed replays are safe because the
-event store is idempotent; this prototype does not provide time-based replay
-expiry or secret rotation. It is not yet a webhook server or production
-inventory system. Future slices can add an HTTP adapter, secret rotation, and
-broader failure/concurrency tests.
+The signature header contract is `sha256=<hex digest>`. Transport adapters must
+retain the raw bytes and use TLS. Exact signed replays are safe because the event
+store is idempotent.
+
+## Local HTTP demo
+
+A standard-library WSGI adapter exposes the complete flow without external
+services:
+
+- `POST /events` requires `Content-Type: application/json`, `Content-Length`, and
+  `X-Event-Signature`; it reports new events as `202` and exact replays as `200`.
+- `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
+  operational read model as deterministic JSON.
+- `GET /healthz` provides a process-level health response.
+
+Run the local-only demo server with a secret supplied through the environment:
+
+```bash
+MERCHANT_EVENT_SECRET='local-demo-only' \
+  python3 -m merchant_event_lab.http --database inventory.sqlite3 --port 8000
+```
+
+For example, sign the exact body bytes and submit one synthetic restock:
+
+```bash
+body='{"event_id":"restock-001","sku":"demo-sku","delta":5}'
+signature="sha256=$(printf %s "$body" | openssl dgst -sha256 -hmac "$MERCHANT_EVENT_SECRET" -hex | cut -d' ' -f2)"
+curl -i http://127.0.0.1:8000/events \
+  -H 'Content-Type: application/json' \
+  -H "X-Event-Signature: $signature" \
+  --data-binary "$body"
+curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5'
+```
+
+The bundled `wsgiref` server is for a local demonstration, not production. The
+prototype does not provide TLS termination, time-based replay expiry, secret
+rotation, distributed rate limiting, or production observability.
