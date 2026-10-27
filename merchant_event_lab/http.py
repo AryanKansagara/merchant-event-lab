@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
@@ -23,11 +23,23 @@ class InventoryHTTPApp:
     local demonstration boundary, not a production web server.
     """
 
-    def __init__(self, store: InventoryStore, secret: bytes, *, max_payload_bytes: int = 64 * 1024):
+    def __init__(
+        self,
+        store: InventoryStore,
+        secrets: Mapping[str, bytes],
+        *,
+        max_payload_bytes: int = 64 * 1024,
+        max_age_seconds: int = 5 * 60,
+        clock: Callable[[], float] | None = None,
+    ):
         self.store = store
-        self.ingestor = SignedEventIngestor(
-            store, secret, max_payload_bytes=max_payload_bytes
-        )
+        options: dict[str, Any] = {
+            "max_payload_bytes": max_payload_bytes,
+            "max_age_seconds": max_age_seconds,
+        }
+        if clock is not None:
+            options["clock"] = clock
+        self.ingestor = SignedEventIngestor(store, secrets, **options)
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         path = environ.get("PATH_INFO", "")
@@ -67,7 +79,12 @@ class InventoryHTTPApp:
             return self._respond(start_response, "400 Bad Request", {"error": "request body shorter than Content-Length"})
 
         try:
-            applied = self.ingestor.ingest(body, environ.get("HTTP_X_EVENT_SIGNATURE", ""))
+            applied = self.ingestor.ingest(
+                body,
+                environ.get("HTTP_X_EVENT_SIGNATURE", ""),
+                environ.get("HTTP_X_EVENT_KEY_ID", ""),
+                environ.get("HTTP_X_EVENT_TIMESTAMP", ""),
+            )
         except AuthenticationError:
             return self._respond(start_response, "401 Unauthorized", {"error": "invalid signature"})
         except PayloadError as error:
@@ -147,10 +164,23 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
 
-    secret = os.environ.get("MERCHANT_EVENT_SECRET")
-    if not secret:
-        parser.error("MERCHANT_EVENT_SECRET must be set")
-    app = InventoryHTTPApp(InventoryStore(args.database), secret.encode())
+    raw_secrets = os.environ.get("MERCHANT_EVENT_SECRETS")
+    if not raw_secrets:
+        parser.error("MERCHANT_EVENT_SECRETS must be set to a JSON object")
+    try:
+        decoded_secrets = json.loads(raw_secrets)
+        if not isinstance(decoded_secrets, dict) or not decoded_secrets:
+            raise ValueError
+        secrets = {
+            key_id: secret.encode()
+            for key_id, secret in decoded_secrets.items()
+            if isinstance(key_id, str) and isinstance(secret, str)
+        }
+        if len(secrets) != len(decoded_secrets):
+            raise ValueError
+        app = InventoryHTTPApp(InventoryStore(args.database), secrets)
+    except (json.JSONDecodeError, UnicodeEncodeError, ValueError):
+        parser.error("MERCHANT_EVENT_SECRETS must map key IDs to string secrets")
     with make_server(args.host, args.port, app) as server:
         print(f"Serving local demo on http://{args.host}:{args.port}")
         server.serve_forever()
