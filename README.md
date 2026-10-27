@@ -66,7 +66,8 @@ services:
 
 - `POST /events` requires `Content-Type: application/json`, `Content-Length`,
   `X-Event-Key-Id`, `X-Event-Timestamp`, and `X-Event-Signature`; it reports new
-  events as `202` and exact replays as `200`.
+  events as `202` and exact replays as `200`. The demo applies a process-local
+  fixed-window request limit and returns `429` with `Retry-After` when full.
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON.
 - `GET /healthz` provides a process-level health response.
@@ -75,7 +76,8 @@ Run the local-only demo server with a secret supplied through the environment:
 
 ```bash
 MERCHANT_EVENT_SECRETS='{"local":"local-demo-only"}' \
-  python3 -m merchant_event_lab.http --database inventory.sqlite3 --port 8000
+  python3 -m merchant_event_lab.http --database inventory.sqlite3 --port 8000 \
+  --event-rate-limit 60 --rate-window-seconds 60
 ```
 
 For example, sign the exact body bytes and submit one synthetic restock:
@@ -95,4 +97,7 @@ curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5'
 
 The bundled `wsgiref` server is for a local demonstration, not production. The
 prototype does not provide TLS termination, secret-manager integration,
-distributed rate limiting, or production observability.
+distributed rate limiting, or production observability. Its single global
+in-process rate bucket is intentionally narrow: restarts reset it and multiple
+workers do not share state. Production deployments should enforce distributed
+tenant-aware limits at a trusted edge, with careful proxy identity handling.

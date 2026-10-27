@@ -141,6 +141,45 @@ class InventoryHTTPAppTests(unittest.TestCase):
         self.assertEqual(status, "400 Bad Request")
         self.assertIn("payload must contain", payload["error"])
 
+    def test_event_endpoint_rate_limit_recovers_after_window(self):
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            event_rate_limit=2,
+            rate_window_seconds=30,
+            clock=lambda: self.now,
+        )
+        first = b'{"event_id":"restock-1","sku":"demo","delta":1}'
+        second = b'{"event_id":"restock-2","sku":"demo","delta":1}'
+        third = b'{"event_id":"restock-3","sku":"demo","delta":1}'
+
+        self.assertEqual(self.post_event(first)[0], "202 Accepted")
+        self.assertEqual(self.post_event(second)[0], "202 Accepted")
+        status, headers, payload = self.post_event(third)
+        self.assertEqual(status, "429 Too Many Requests")
+        self.assertEqual(headers["Retry-After"], "30")
+        self.assertIn("rate limit", payload["error"])
+        self.assertEqual(self.store.stock("demo"), 2)
+
+        self.now += 30
+        status, _, _ = self.post_event(third)
+        self.assertEqual(status, "202 Accepted")
+        self.assertEqual(self.store.stock("demo"), 3)
+
+    def test_event_rate_limit_configuration_must_be_positive(self):
+        with self.assertRaises(ValueError):
+            InventoryHTTPApp(
+                self.store,
+                {"current": self.secret},
+                event_rate_limit=0,
+            )
+        with self.assertRaises(ValueError):
+            InventoryHTTPApp(
+                self.store,
+                {"current": self.secret},
+                rate_window_seconds=0,
+            )
+
     def test_inventory_endpoint_returns_filtered_keyset_pages(self):
         self.store.apply("a", "alpha", 1)
         self.store.apply("b", "beta", 5)

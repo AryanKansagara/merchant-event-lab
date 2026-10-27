@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import threading
+import time
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 from urllib.parse import parse_qs
@@ -14,6 +16,40 @@ from .ingestion import AuthenticationError, PayloadError, SignedEventIngestor
 from .inventory import InventoryStore
 
 StartResponse = Callable[[str, list[tuple[str, str]]], Any]
+
+
+class _FixedWindowRateLimiter:
+    """Thread-safe, process-local protection for the demo ingestion endpoint."""
+
+    def __init__(
+        self,
+        limit: int,
+        window_seconds: int,
+        clock: Callable[[], float],
+    ):
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("event_rate_limit must be a positive integer")
+        if type(window_seconds) is not int or window_seconds <= 0:
+            raise ValueError("rate_window_seconds must be a positive integer")
+        self.limit = limit
+        self.window_seconds = window_seconds
+        self._clock = clock
+        self._window_started: float | None = None
+        self._requests = 0
+        self._lock = threading.Lock()
+
+    def allow(self) -> tuple[bool, int]:
+        with self._lock:
+            now = self._clock()
+            if self._window_started is None or now - self._window_started >= self.window_seconds:
+                self._window_started = now
+                self._requests = 0
+            elapsed = max(0.0, now - self._window_started)
+            retry_after = max(1, int(self.window_seconds - elapsed + 0.999))
+            if self._requests >= self.limit:
+                return False, retry_after
+            self._requests += 1
+            return True, retry_after
 
 
 class InventoryHTTPApp:
@@ -30,16 +66,23 @@ class InventoryHTTPApp:
         *,
         max_payload_bytes: int = 64 * 1024,
         max_age_seconds: int = 5 * 60,
+        event_rate_limit: int = 60,
+        rate_window_seconds: int = 60,
         clock: Callable[[], float] | None = None,
     ):
         self.store = store
+        selected_clock = clock if clock is not None else time.time
         options: dict[str, Any] = {
             "max_payload_bytes": max_payload_bytes,
             "max_age_seconds": max_age_seconds,
+            "clock": selected_clock,
         }
-        if clock is not None:
-            options["clock"] = clock
         self.ingestor = SignedEventIngestor(store, secrets, **options)
+        self._event_rate_limiter = _FixedWindowRateLimiter(
+            event_rate_limit,
+            rate_window_seconds,
+            selected_clock,
+        )
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         path = environ.get("PATH_INFO", "")
@@ -60,6 +103,15 @@ class InventoryHTTPApp:
         return self._respond(start_response, "404 Not Found", {"error": "not found"})
 
     def _post_event(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        allowed, retry_after = self._event_rate_limiter.allow()
+        if not allowed:
+            return self._respond(
+                start_response,
+                "429 Too Many Requests",
+                {"error": "event request rate limit exceeded"},
+                [("Retry-After", str(retry_after))],
+            )
+
         content_type = environ.get("CONTENT_TYPE", "").partition(";")[0].strip().lower()
         if content_type != "application/json":
             return self._respond(start_response, "415 Unsupported Media Type", {"error": "content type must be application/json"})
@@ -157,11 +209,23 @@ class InventoryHTTPApp:
         return [body]
 
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("must be a positive integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local merchant-event demo API")
     parser.add_argument("--database", default="inventory.sqlite3")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--event-rate-limit", type=_positive_int, default=60)
+    parser.add_argument("--rate-window-seconds", type=_positive_int, default=60)
     args = parser.parse_args()
 
     raw_secrets = os.environ.get("MERCHANT_EVENT_SECRETS")
@@ -178,7 +242,12 @@ def main() -> None:
         }
         if len(secrets) != len(decoded_secrets):
             raise ValueError
-        app = InventoryHTTPApp(InventoryStore(args.database), secrets)
+        app = InventoryHTTPApp(
+            InventoryStore(args.database),
+            secrets,
+            event_rate_limit=args.event_rate_limit,
+            rate_window_seconds=args.rate_window_seconds,
+        )
     except (json.JSONDecodeError, UnicodeEncodeError, ValueError):
         parser.error("MERCHANT_EVENT_SECRETS must map key IDs to string secrets")
     with make_server(args.host, args.port, app) as server:
