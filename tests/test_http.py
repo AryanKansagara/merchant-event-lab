@@ -16,7 +16,14 @@ class InventoryHTTPAppTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.store = InventoryStore(Path(self.tmp.name) / "events.sqlite3")
         self.secret = b"http-test-secret"
-        self.app = InventoryHTTPApp(self.store, self.secret, max_payload_bytes=128)
+        self.now = 1_800_000_000
+        self.timestamp = str(self.now)
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            max_payload_bytes=128,
+            clock=lambda: self.now,
+        )
 
     def request(
         self,
@@ -27,6 +34,8 @@ class InventoryHTTPAppTests(unittest.TestCase):
         query="",
         content_type="",
         signature="",
+        key_id="current",
+        timestamp=None,
         content_length=None,
     ):
         captured = {}
@@ -42,6 +51,8 @@ class InventoryHTTPAppTests(unittest.TestCase):
             "CONTENT_TYPE": content_type,
             "CONTENT_LENGTH": str(len(body)) if content_length is None else content_length,
             "HTTP_X_EVENT_SIGNATURE": signature,
+            "HTTP_X_EVENT_KEY_ID": key_id,
+            "HTTP_X_EVENT_TIMESTAMP": self.timestamp if timestamp is None else timestamp,
             "wsgi.input": io.BytesIO(body),
         }
         response_body = b"".join(self.app(environ, start_response))
@@ -49,8 +60,10 @@ class InventoryHTTPAppTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["Cache-Control"], "no-store")
         return captured["status"], captured["headers"], json.loads(response_body)
 
-    def sign(self, body):
-        return "sha256=" + hmac.new(self.secret, body, hashlib.sha256).hexdigest()
+    def sign(self, body, *, timestamp=None):
+        selected_timestamp = self.timestamp if timestamp is None else timestamp
+        message = selected_timestamp.encode() + b"." + body
+        return "sha256=" + hmac.new(self.secret, message, hashlib.sha256).hexdigest()
 
     def post_event(self, body):
         return self.request(
@@ -84,6 +97,31 @@ class InventoryHTTPAppTests(unittest.TestCase):
                 status, _, payload = self.request("POST", "/events", body=body, **options)
                 self.assertEqual(status, expected_status)
                 self.assertIn("error", payload)
+        self.assertEqual(self.store.stock("demo"), 0)
+
+    def test_event_endpoint_rejects_missing_key_id_and_stale_timestamp(self):
+        body = b'{"event_id":"restock-1","sku":"demo","delta":4}'
+
+        status, _, _ = self.request(
+            "POST",
+            "/events",
+            body=body,
+            content_type="application/json",
+            signature=self.sign(body),
+            key_id="",
+        )
+        self.assertEqual(status, "401 Unauthorized")
+
+        stale = str(self.now - 301)
+        status, _, _ = self.request(
+            "POST",
+            "/events",
+            body=body,
+            content_type="application/json",
+            signature=self.sign(body, timestamp=stale),
+            timestamp=stale,
+        )
+        self.assertEqual(status, "401 Unauthorized")
         self.assertEqual(self.store.stock("demo"), 0)
 
     def test_event_endpoint_rejects_short_or_invalid_authenticated_body(self):
