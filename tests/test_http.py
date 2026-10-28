@@ -211,6 +211,74 @@ class InventoryHTTPAppTests(unittest.TestCase):
         status, _, _ = self.request("GET", "/missing")
         self.assertEqual(status, "404 Not Found")
 
+    def test_structured_access_observability_correlates_response(self):
+        records = []
+        monotonic_values = iter((10.0, 10.012345))
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            access_log=records.append,
+            request_id_factory=lambda: "request-123",
+            monotonic_clock=lambda: next(monotonic_values),
+            clock=lambda: self.now,
+        )
+
+        status, headers, _ = self.request("GET", "/inventory", query="low_stock_at=2")
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(headers["X-Request-ID"], "request-123")
+        self.assertEqual(
+            records,
+            [
+                {
+                    "duration_ms": 12.345,
+                    "method": "GET",
+                    "path": "/inventory",
+                    "request_id": "request-123",
+                    "status": 200,
+                }
+            ],
+        )
+        self.assertNotIn("low_stock_at", json.dumps(records))
+
+    def test_access_observability_records_rejected_requests_without_sensitive_data(self):
+        records = []
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            access_log=records.append,
+            request_id_factory=lambda: "rejected-123",
+            monotonic_clock=lambda: 1.0,
+            clock=lambda: self.now,
+        )
+        secret_body = b'{"secret":"must-not-be-logged"}'
+
+        status, headers, _ = self.request(
+            "POST",
+            "/events",
+            body=secret_body,
+            content_type="text/plain",
+            signature="must-not-be-logged",
+        )
+
+        self.assertEqual(status, "415 Unsupported Media Type")
+        self.assertEqual(headers["X-Request-ID"], "rejected-123")
+        self.assertEqual(records[0]["status"], 415)
+        serialized = json.dumps(records)
+        self.assertNotIn("secret", serialized)
+        self.assertNotIn("signature", serialized)
+
+    def test_request_id_factory_cannot_inject_response_headers(self):
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            request_id_factory=lambda: "bad\r\nInjected: yes",
+            clock=lambda: self.now,
+        )
+
+        with self.assertRaisesRegex(ValueError, "printable ASCII"):
+            self.request("GET", "/healthz")
+
 
 if __name__ == "__main__":
     unittest.main()
