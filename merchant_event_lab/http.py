@@ -5,8 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import threading
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 from urllib.parse import parse_qs
@@ -69,6 +71,9 @@ class InventoryHTTPApp:
         event_rate_limit: int = 60,
         rate_window_seconds: int = 60,
         clock: Callable[[], float] | None = None,
+        access_log: Callable[[Mapping[str, object]], None] | None = None,
+        request_id_factory: Callable[[], str] | None = None,
+        monotonic_clock: Callable[[], float] | None = None,
     ):
         self.store = store
         selected_clock = clock if clock is not None else time.time
@@ -83,8 +88,42 @@ class InventoryHTTPApp:
             rate_window_seconds,
             selected_clock,
         )
+        self._access_log = access_log
+        self._request_id_factory = request_id_factory or (lambda: uuid.uuid4().hex)
+        self._monotonic_clock = monotonic_clock or time.monotonic
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        request_id = self._request_id_factory()
+        if (
+            not isinstance(request_id, str)
+            or not request_id
+            or len(request_id) > 128
+            or not request_id.isascii()
+            or not request_id.isprintable()
+        ):
+            raise ValueError("request_id_factory must return 1-128 printable ASCII characters")
+        started = self._monotonic_clock()
+        response_status = 500
+
+        def observed_start_response(status: str, headers: list[tuple[str, str]]) -> Any:
+            nonlocal response_status
+            response_status = int(status.partition(" ")[0])
+            return start_response(status, [*headers, ("X-Request-ID", request_id)])
+
+        response = self._dispatch(environ, observed_start_response)
+        if self._access_log is not None:
+            self._access_log(
+                {
+                    "duration_ms": round(max(0.0, self._monotonic_clock() - started) * 1000, 3),
+                    "method": environ.get("REQUEST_METHOD", "").upper(),
+                    "path": environ.get("PATH_INFO", ""),
+                    "request_id": request_id,
+                    "status": response_status,
+                }
+            )
+        return response
+
+    def _dispatch(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         path = environ.get("PATH_INFO", "")
         method = environ.get("REQUEST_METHOD", "").upper()
 
@@ -219,6 +258,12 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _write_access_log(event: Mapping[str, object]) -> None:
+    """Write one bounded JSON record without request bodies, queries, or secrets."""
+
+    print(json.dumps(event, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local merchant-event demo API")
     parser.add_argument("--database", default="inventory.sqlite3")
@@ -247,6 +292,7 @@ def main() -> None:
             secrets,
             event_rate_limit=args.event_rate_limit,
             rate_window_seconds=args.rate_window_seconds,
+            access_log=_write_access_log,
         )
     except (json.JSONDecodeError, UnicodeEncodeError, ValueError):
         parser.error("MERCHANT_EVENT_SECRETS must map key IDs to string secrets")

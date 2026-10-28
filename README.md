@@ -72,6 +72,12 @@ services:
   operational read model as deterministic JSON.
 - `GET /healthz` provides a process-level health response.
 
+Every response includes an application-generated `X-Request-ID`. The CLI emits
+one JSON access record to standard error with that ID, method, path, status, and
+request duration. Records deliberately omit query strings, headers, request
+bodies, signatures, key IDs, and event data so operational correlation does not
+turn the access log into a credential or merchant-data sink.
+
 Run the local-only demo server with a secret supplied through the environment:
 
 ```bash
@@ -97,7 +103,9 @@ curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5'
 
 The bundled `wsgiref` server is for a local demonstration, not production. The
 prototype does not provide TLS termination, secret-manager integration,
-distributed rate limiting, or production observability. Its single global
-in-process rate bucket is intentionally narrow: restarts reset it and multiple
-workers do not share state. Production deployments should enforce distributed
-tenant-aware limits at a trusted edge, with careful proxy identity handling.
+distributed rate limiting, metrics, tracing, or durable log shipping. Its
+single global in-process rate bucket is intentionally narrow: restarts reset it
+and multiple workers do not share state. Production deployments should enforce
+distributed tenant-aware limits at a trusted edge, with careful proxy identity handling.
+Production logging should use a bounded, non-blocking sink with retention and
+redaction controls rather than writing synchronously to standard error.
