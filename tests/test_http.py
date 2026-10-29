@@ -60,6 +60,25 @@ class InventoryHTTPAppTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["Cache-Control"], "no-store")
         return captured["status"], captured["headers"], json.loads(response_body)
 
+    def raw_request(self, method, path):
+        captured = {}
+
+        def start_response(status, headers):
+            captured["status"] = status
+            captured["headers"] = dict(headers)
+
+        environ = {
+            "REQUEST_METHOD": method,
+            "PATH_INFO": path,
+            "QUERY_STRING": "",
+            "CONTENT_TYPE": "",
+            "CONTENT_LENGTH": "0",
+            "wsgi.input": io.BytesIO(),
+        }
+        body = b"".join(self.app(environ, start_response))
+        self.assertEqual(int(captured["headers"]["Content-Length"]), len(body))
+        return captured["status"], captured["headers"], body
+
     def sign(self, body, *, timestamp=None):
         selected_timestamp = self.timestamp if timestamp is None else timestamp
         message = selected_timestamp.encode() + b"." + body
@@ -210,6 +229,53 @@ class InventoryHTTPAppTests(unittest.TestCase):
 
         status, _, _ = self.request("GET", "/missing")
         self.assertEqual(status, "404 Not Found")
+
+    def test_metrics_are_prometheus_compatible_and_use_bounded_routes(self):
+        monotonic_values = iter((1.0, 1.125, 2.0, 2.25, 3.0, 3.375, 4.0, 4.5))
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            monotonic_clock=lambda: next(monotonic_values),
+            clock=lambda: self.now,
+        )
+
+        self.request("GET", "/healthz")
+        self.request("GET", "/customer/secret-id")
+        self.request("ATTACKER-CONTROLLED", "/healthz")
+        status, headers, body = self.raw_request("GET", "/metrics")
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(headers["Content-Type"], "text/plain; version=0.0.4; charset=utf-8")
+        text = body.decode()
+        self.assertIn("# TYPE merchant_http_request_duration_seconds summary", text)
+        self.assertIn(
+            'merchant_http_requests_total{method="GET",route="/healthz",status="200"} 1',
+            text,
+        )
+        self.assertIn(
+            'merchant_http_requests_total{method="GET",route="unknown",status="404"} 1',
+            text,
+        )
+        self.assertIn(
+            'merchant_http_request_duration_seconds_sum{method="GET",route="/healthz",status="200"} 0.125000',
+            text,
+        )
+        self.assertIn(
+            'merchant_http_request_duration_seconds_count{method="GET",route="/healthz",status="200"} 1',
+            text,
+        )
+        self.assertIn(
+            'merchant_http_requests_total{method="OTHER",route="/healthz",status="405"} 1',
+            text,
+        )
+        self.assertNotIn("ATTACKER-CONTROLLED", text)
+        self.assertNotIn("customer", text)
+        self.assertNotIn("secret-id", text)
+
+    def test_metrics_endpoint_method_contract(self):
+        status, headers, _ = self.request("POST", "/metrics")
+        self.assertEqual(status, "405 Method Not Allowed")
+        self.assertEqual(headers["Allow"], "GET")
 
     def test_structured_access_observability_correlates_response(self):
         records = []

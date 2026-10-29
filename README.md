@@ -71,6 +71,8 @@ services:
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON.
 - `GET /healthz` provides a process-level health response.
+- `GET /metrics` exposes dependency-free Prometheus text counters and request
+  duration sums with bounded method, route, and status labels.
 
 Every response includes an application-generated `X-Request-ID`. The CLI emits
 one JSON access record to standard error with that ID, method, path, status, and
@@ -101,9 +103,15 @@ curl -i http://127.0.0.1:8000/events \
 curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5'
 ```
 
+Metrics normalize every unknown path to an `unknown` route label instead of
+recording user-controlled path values. They contain no query strings, request
+bodies, signatures, key IDs, SKU values, or event IDs. Metrics are process-local
+and reset on restart; production deployments should aggregate across workers and
+protect operational endpoints at the network boundary.
+
 The bundled `wsgiref` server is for a local demonstration, not production. The
 prototype does not provide TLS termination, secret-manager integration,
-distributed rate limiting, metrics, tracing, or durable log shipping. Its
+distributed rate limiting, tracing, or durable log shipping. Its
 single global in-process rate bucket is intentionally narrow: restarts reset it
 and multiple workers do not share state. Production deployments should enforce
 distributed tenant-aware limits at a trusted edge, with careful proxy identity handling.

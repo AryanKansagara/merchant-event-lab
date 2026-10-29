@@ -54,6 +54,44 @@ class _FixedWindowRateLimiter:
             return True, retry_after
 
 
+class _RequestMetrics:
+    """Thread-safe, bounded-label request metrics for the local demo."""
+
+    def __init__(self) -> None:
+        self._values: dict[tuple[str, str, int], tuple[int, float]] = {}
+        self._lock = threading.Lock()
+
+    def observe(self, method: str, route: str, status: int, duration_seconds: float) -> None:
+        key = (method, route, status)
+        with self._lock:
+            count, duration = self._values.get(key, (0, 0.0))
+            self._values[key] = (count + 1, duration + max(0.0, duration_seconds))
+
+    def render(self) -> bytes:
+        with self._lock:
+            values = sorted(self._values.items())
+        lines = [
+            "# HELP merchant_http_requests_total HTTP requests completed by bounded route.",
+            "# TYPE merchant_http_requests_total counter",
+        ]
+        for (method, route, status), (count, _) in values:
+            labels = f'method="{method}",route="{route}",status="{status}"'
+            lines.append(f"merchant_http_requests_total{{{labels}}} {count}")
+        lines.extend(
+            [
+                "# HELP merchant_http_request_duration_seconds Request duration by bounded route.",
+                "# TYPE merchant_http_request_duration_seconds summary",
+            ]
+        )
+        for (method, route, status), (count, _) in values:
+            labels = f'method="{method}",route="{route}",status="{status}"'
+            lines.append(f"merchant_http_request_duration_seconds_count{{{labels}}} {count}")
+        for (method, route, status), (_, duration) in values:
+            labels = f'method="{method}",route="{route}",status="{status}"'
+            lines.append(f"merchant_http_request_duration_seconds_sum{{{labels}}} {duration:.6f}")
+        return ("\n".join(lines) + "\n").encode()
+
+
 class InventoryHTTPApp:
     """Expose signed event ingestion and inventory reads through WSGI.
 
@@ -91,6 +129,7 @@ class InventoryHTTPApp:
         self._access_log = access_log
         self._request_id_factory = request_id_factory or (lambda: uuid.uuid4().hex)
         self._monotonic_clock = monotonic_clock or time.monotonic
+        self._request_metrics = _RequestMetrics()
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         request_id = self._request_id_factory()
@@ -111,12 +150,18 @@ class InventoryHTTPApp:
             return start_response(status, [*headers, ("X-Request-ID", request_id)])
 
         response = self._dispatch(environ, observed_start_response)
+        duration_seconds = max(0.0, self._monotonic_clock() - started)
+        method = environ.get("REQUEST_METHOD", "").upper()
+        path = environ.get("PATH_INFO", "")
+        route = path if path in {"/events", "/inventory", "/healthz", "/metrics"} else "unknown"
+        metric_method = method if method in {"GET", "POST"} else "OTHER"
+        self._request_metrics.observe(metric_method, route, response_status, duration_seconds)
         if self._access_log is not None:
             self._access_log(
                 {
-                    "duration_ms": round(max(0.0, self._monotonic_clock() - started) * 1000, 3),
-                    "method": environ.get("REQUEST_METHOD", "").upper(),
-                    "path": environ.get("PATH_INFO", ""),
+                    "duration_ms": round(duration_seconds * 1000, 3),
+                    "method": method,
+                    "path": path,
                     "request_id": request_id,
                     "status": response_status,
                 }
@@ -139,7 +184,23 @@ class InventoryHTTPApp:
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
             return self._respond(start_response, "200 OK", {"status": "ok"})
+        if path == "/metrics":
+            if method != "GET":
+                return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
+            return self._metrics(start_response)
         return self._respond(start_response, "404 Not Found", {"error": "not found"})
+
+    def _metrics(self, start_response: StartResponse) -> list[bytes]:
+        body = self._request_metrics.render()
+        start_response(
+            "200 OK",
+            [
+                ("Content-Type", "text/plain; version=0.0.4; charset=utf-8"),
+                ("Content-Length", str(len(body))),
+                ("Cache-Control", "no-store"),
+            ],
+        )
+        return [body]
 
     def _post_event(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         allowed, retry_after = self._event_rate_limiter.allow()
