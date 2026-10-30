@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -18,6 +19,38 @@ from .ingestion import AuthenticationError, PayloadError, SignedEventIngestor
 from .inventory import InventoryStore
 
 StartResponse = Callable[[str, list[tuple[str, str]]], Any]
+
+_TRACEPARENT = re.compile(
+    r"^00-(?P<trace_id>[0-9a-f]{32})-(?P<parent_id>[0-9a-f]{16})-(?P<flags>0[01])$"
+)
+
+
+def _parse_traceparent(value: object) -> tuple[str, str, str] | None:
+    """Accept the narrow W3C version-00 trace context used by this demo."""
+
+    if not isinstance(value, str):
+        return None
+    match = _TRACEPARENT.fullmatch(value)
+    if match is None:
+        return None
+    trace_id = match.group("trace_id")
+    parent_id = match.group("parent_id")
+    if trace_id == "0" * 32 or parent_id == "0" * 16:
+        return None
+    return trace_id, parent_id, match.group("flags")
+
+
+def _validated_hex_id(value: str, length: int, factory_name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != length
+        or any(character not in "0123456789abcdef" for character in value)
+        or value == "0" * length
+    ):
+        raise ValueError(
+            f"{factory_name} must return {length} lowercase non-zero hex characters"
+        )
+    return value
 
 
 class _FixedWindowRateLimiter:
@@ -110,7 +143,10 @@ class InventoryHTTPApp:
         rate_window_seconds: int = 60,
         clock: Callable[[], float] | None = None,
         access_log: Callable[[Mapping[str, object]], None] | None = None,
+        trace_observer: Callable[[Mapping[str, object]], None] | None = None,
         request_id_factory: Callable[[], str] | None = None,
+        trace_id_factory: Callable[[], str] | None = None,
+        span_id_factory: Callable[[], str] | None = None,
         monotonic_clock: Callable[[], float] | None = None,
     ):
         self.store = store
@@ -127,7 +163,10 @@ class InventoryHTTPApp:
             selected_clock,
         )
         self._access_log = access_log
+        self._trace_observer = trace_observer
         self._request_id_factory = request_id_factory or (lambda: uuid.uuid4().hex)
+        self._trace_id_factory = trace_id_factory or (lambda: uuid.uuid4().hex)
+        self._span_id_factory = span_id_factory or (lambda: uuid.uuid4().hex[:16])
         self._monotonic_clock = monotonic_clock or time.monotonic
         self._request_metrics = _RequestMetrics()
 
@@ -143,11 +182,24 @@ class InventoryHTTPApp:
             raise ValueError("request_id_factory must return 1-128 printable ASCII characters")
         started = self._monotonic_clock()
         response_status = 500
+        incoming_trace = _parse_traceparent(environ.get("HTTP_TRACEPARENT"))
+        trace_id = (
+            incoming_trace[0]
+            if incoming_trace is not None
+            else _validated_hex_id(self._trace_id_factory(), 32, "trace_id_factory")
+        )
+        parent_span_id = incoming_trace[1] if incoming_trace is not None else None
+        trace_flags = incoming_trace[2] if incoming_trace is not None else "01"
+        span_id = _validated_hex_id(self._span_id_factory(), 16, "span_id_factory")
+        response_traceparent = f"00-{trace_id}-{span_id}-{trace_flags}"
 
         def observed_start_response(status: str, headers: list[tuple[str, str]]) -> Any:
             nonlocal response_status
             response_status = int(status.partition(" ")[0])
-            return start_response(status, [*headers, ("X-Request-ID", request_id)])
+            return start_response(
+                status,
+                [*headers, ("X-Request-ID", request_id), ("traceparent", response_traceparent)],
+            )
 
         response = self._dispatch(environ, observed_start_response)
         duration_seconds = max(0.0, self._monotonic_clock() - started)
@@ -156,6 +208,18 @@ class InventoryHTTPApp:
         route = path if path in {"/events", "/inventory", "/healthz", "/metrics"} else "unknown"
         metric_method = method if method in {"GET", "POST"} else "OTHER"
         self._request_metrics.observe(metric_method, route, response_status, duration_seconds)
+        if self._trace_observer is not None:
+            self._trace_observer(
+                {
+                    "duration_ms": round(duration_seconds * 1000, 3),
+                    "method": metric_method,
+                    "parent_span_id": parent_span_id,
+                    "route": route,
+                    "span_id": span_id,
+                    "status": response_status,
+                    "trace_id": trace_id,
+                }
+            )
         if self._access_log is not None:
             self._access_log(
                 {
@@ -325,6 +389,12 @@ def _write_access_log(event: Mapping[str, object]) -> None:
     print(json.dumps(event, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
 
 
+def _write_trace_span(event: Mapping[str, object]) -> None:
+    """Write a bounded demo span suitable for replacing with a real exporter."""
+
+    print(json.dumps(event, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local merchant-event demo API")
     parser.add_argument("--database", default="inventory.sqlite3")
@@ -354,6 +424,7 @@ def main() -> None:
             event_rate_limit=args.event_rate_limit,
             rate_window_seconds=args.rate_window_seconds,
             access_log=_write_access_log,
+            trace_observer=_write_trace_span,
         )
     except (json.JSONDecodeError, UnicodeEncodeError, ValueError):
         parser.error("MERCHANT_EVENT_SECRETS must map key IDs to string secrets")

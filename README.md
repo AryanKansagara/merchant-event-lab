@@ -80,6 +80,15 @@ request duration. Records deliberately omit query strings, headers, request
 bodies, signatures, key IDs, and event data so operational correlation does not
 turn the access log into a credential or merchant-data sink.
 
+The adapter also accepts a strict W3C `traceparent` version-00 header, continues
+valid trace IDs with a new server span, and returns the resulting context in the
+response. Missing or malformed context starts a fresh trace instead of trusting
+unbounded caller input. The CLI emits a second bounded JSON span record with
+normalized method/route labels, status, duration, trace ID, span ID, and optional
+parent span ID. It never records query strings, arbitrary paths, request bodies,
+event data, or baggage. Applications can replace the injectable observer with a
+real non-blocking trace exporter.
+
 Run the local-only demo server with a secret supplied through the environment:
 
 ```bash
@@ -111,9 +120,10 @@ protect operational endpoints at the network boundary.
 
 The bundled `wsgiref` server is for a local demonstration, not production. The
 prototype does not provide TLS termination, secret-manager integration,
-distributed rate limiting, tracing, or durable log shipping. Its
-single global in-process rate bucket is intentionally narrow: restarts reset it
-and multiple workers do not share state. Production deployments should enforce
-distributed tenant-aware limits at a trusted edge, with careful proxy identity handling.
+distributed rate limiting, an external trace collector, or durable log
+shipping. Its single global in-process rate bucket is intentionally narrow:
+restarts reset it and multiple workers do not share state. Production deployments
+should enforce distributed tenant-aware limits at a trusted edge, with careful
+proxy identity handling.
 Production logging should use a bounded, non-blocking sink with retention and
 redaction controls rather than writing synchronously to standard error.
