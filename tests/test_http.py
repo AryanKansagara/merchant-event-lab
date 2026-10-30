@@ -345,6 +345,103 @@ class InventoryHTTPAppTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "printable ASCII"):
             self.request("GET", "/healthz")
 
+    def test_trace_context_continues_valid_parent_with_bounded_span(self):
+        spans = []
+        monotonic_values = iter((20.0, 20.25))
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            trace_observer=spans.append,
+            span_id_factory=lambda: "b" * 16,
+            trace_id_factory=lambda: "f" * 32,
+            monotonic_clock=lambda: next(monotonic_values),
+            clock=lambda: self.now,
+        )
+        captured = {}
+
+        def start_response(status, headers):
+            captured["headers"] = dict(headers)
+
+        environ = {
+            "REQUEST_METHOD": "GET",
+            "PATH_INFO": "/inventory",
+            "QUERY_STRING": "after_sku=private-sku",
+            "CONTENT_TYPE": "",
+            "CONTENT_LENGTH": "0",
+            "HTTP_TRACEPARENT": f"00-{'a' * 32}-{'c' * 16}-01",
+            "wsgi.input": io.BytesIO(),
+        }
+        b"".join(self.app(environ, start_response))
+
+        self.assertEqual(captured["headers"]["traceparent"], f"00-{'a' * 32}-{'b' * 16}-01")
+        self.assertEqual(
+            spans,
+            [
+                {
+                    "duration_ms": 250.0,
+                    "method": "GET",
+                    "parent_span_id": "c" * 16,
+                    "route": "/inventory",
+                    "span_id": "b" * 16,
+                    "status": 200,
+                    "trace_id": "a" * 32,
+                }
+            ],
+        )
+        self.assertNotIn("private-sku", json.dumps(spans))
+
+    def test_invalid_trace_context_starts_new_trace_and_bounds_labels(self):
+        spans = []
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            trace_observer=spans.append,
+            trace_id_factory=lambda: "d" * 32,
+            span_id_factory=lambda: "e" * 16,
+            monotonic_clock=lambda: 1.0,
+            clock=lambda: self.now,
+        )
+        captured = {}
+
+        def start_response(status, headers):
+            captured["headers"] = dict(headers)
+
+        environ = {
+            "REQUEST_METHOD": "ATTACKER-METHOD",
+            "PATH_INFO": "/customer/private-id",
+            "QUERY_STRING": "",
+            "CONTENT_TYPE": "",
+            "CONTENT_LENGTH": "0",
+            "HTTP_TRACEPARENT": f"00-{'0' * 32}-{'a' * 16}-01",
+            "wsgi.input": io.BytesIO(),
+        }
+        b"".join(self.app(environ, start_response))
+
+        self.assertEqual(captured["headers"]["traceparent"], f"00-{'d' * 32}-{'e' * 16}-01")
+        self.assertIsNone(spans[0]["parent_span_id"])
+        self.assertEqual(spans[0]["method"], "OTHER")
+        self.assertEqual(spans[0]["route"], "unknown")
+        self.assertNotIn("customer", json.dumps(spans))
+
+    def test_trace_factories_cannot_inject_response_headers(self):
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            clock=lambda: self.now,
+            trace_id_factory=lambda: "bad\r\nInjected: yes",
+        )
+        with self.assertRaisesRegex(ValueError, "lowercase non-zero hex"):
+            self.request("GET", "/healthz")
+
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            clock=lambda: self.now,
+            span_id_factory=lambda: "0" * 16,
+        )
+        with self.assertRaisesRegex(ValueError, "lowercase non-zero hex"):
+            self.request("GET", "/healthz")
+
 
 if __name__ == "__main__":
     unittest.main()
