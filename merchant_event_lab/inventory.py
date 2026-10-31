@@ -1,6 +1,7 @@
 """Persistent, idempotent inventory event ledger (integer units only)."""
 
 import sqlite3
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,7 +28,7 @@ class InventoryPage:
 class InventoryStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             db.execute("""CREATE TABLE IF NOT EXISTS events (
                 event_id TEXT PRIMARY KEY,
                 sku TEXT NOT NULL,
@@ -51,7 +52,7 @@ class InventoryStore:
         ):
             raise ValueError("delta must be a non-zero signed 64-bit integer")
 
-        with sqlite3.connect(self.path, timeout=10) as db:
+        with closing(sqlite3.connect(self.path, timeout=10)) as db, db:
             db.execute("BEGIN IMMEDIATE")
             prior = db.execute(
                 "SELECT sku, delta FROM events WHERE event_id = ?", (event_id,)
@@ -74,10 +75,26 @@ class InventoryStore:
             return True
 
     def stock(self, sku: str) -> int:
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             return db.execute(
                 "SELECT COALESCE(SUM(delta), 0) FROM events WHERE sku = ?", (sku,)
             ).fetchone()[0]
+
+    def is_ready(self) -> bool:
+        """Return whether the existing database and event schema are readable.
+
+        Read-write URI mode prevents a missing database from being silently
+        created by a readiness check. Database details are deliberately reduced
+        to a boolean so transport adapters do not expose paths or SQL errors.
+        """
+
+        database_uri = f"{self.path.resolve().as_uri()}?mode=rw"
+        try:
+            with closing(sqlite3.connect(database_uri, uri=True, timeout=1)) as db:
+                db.execute("SELECT event_id, sku, delta FROM events LIMIT 1").fetchone()
+        except (OSError, sqlite3.Error):
+            return False
+        return True
 
     def inventory_page(
         self,
@@ -117,7 +134,7 @@ class InventoryStore:
             parameters.append(low_stock_at)
         parameters.append(limit + 1)
 
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db, db:
             rows = db.execute(
                 f"""SELECT sku, SUM(delta) AS stock
                     FROM events

@@ -223,12 +223,32 @@ class InventoryHTTPAppTests(unittest.TestCase):
         status, _, payload = self.request("GET", "/healthz")
         self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
 
+        status, _, payload = self.request("GET", "/readyz")
+        self.assertEqual((status, payload), ("200 OK", {"status": "ready"}))
+
+        status, headers, _ = self.request("POST", "/readyz")
+        self.assertEqual(status, "405 Method Not Allowed")
+        self.assertEqual(headers["Allow"], "GET")
+
         status, headers, _ = self.request("GET", "/events")
         self.assertEqual(status, "405 Method Not Allowed")
         self.assertEqual(headers["Allow"], "POST")
 
         status, _, _ = self.request("GET", "/missing")
         self.assertEqual(status, "404 Not Found")
+
+    def test_readiness_failure_is_sanitized_and_does_not_change_liveness(self):
+        self.store.path.unlink()
+
+        status, _, payload = self.request("GET", "/readyz")
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"status": "unavailable"}),
+        )
+        self.assertFalse(self.store.path.exists())
+
+        status, _, payload = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
 
     def test_metrics_are_prometheus_compatible_and_use_bounded_routes(self):
         monotonic_values = iter((1.0, 1.125, 2.0, 2.25, 3.0, 3.375, 4.0, 4.5))

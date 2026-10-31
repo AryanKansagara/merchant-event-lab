@@ -71,6 +71,9 @@ services:
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON.
 - `GET /healthz` provides a process-level health response.
+- `GET /readyz` verifies that the existing SQLite database and expected event
+  schema are readable, returning `503` without leaking database details when
+  the dependency is unavailable. It does not create a missing database.
 - `GET /metrics` exposes dependency-free Prometheus text counters and request
   duration sums with bounded method, route, and status labels.
 
@@ -125,5 +128,9 @@ shipping. Its single global in-process rate bucket is intentionally narrow:
 restarts reset it and multiple workers do not share state. Production deployments
 should enforce distributed tenant-aware limits at a trusted edge, with careful
 proxy identity handling.
+The liveness endpoint only reports that the process can dispatch requests;
+readiness separately checks SQLite so an orchestrator can stop routing traffic
+without restarting an otherwise healthy process. Production readiness checks
+should also cover any external dependencies introduced by a real deployment.
 Production logging should use a bounded, non-blocking sink with retention and
 redaction controls rather than writing synchronously to standard error.

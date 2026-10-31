@@ -205,7 +205,11 @@ class InventoryHTTPApp:
         duration_seconds = max(0.0, self._monotonic_clock() - started)
         method = environ.get("REQUEST_METHOD", "").upper()
         path = environ.get("PATH_INFO", "")
-        route = path if path in {"/events", "/inventory", "/healthz", "/metrics"} else "unknown"
+        route = (
+            path
+            if path in {"/events", "/inventory", "/healthz", "/readyz", "/metrics"}
+            else "unknown"
+        )
         metric_method = method if method in {"GET", "POST"} else "OTHER"
         self._request_metrics.observe(metric_method, route, response_status, duration_seconds)
         if self._trace_observer is not None:
@@ -248,6 +252,16 @@ class InventoryHTTPApp:
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
             return self._respond(start_response, "200 OK", {"status": "ok"})
+        if path == "/readyz":
+            if method != "GET":
+                return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
+            if not self.store.is_ready():
+                return self._respond(
+                    start_response,
+                    "503 Service Unavailable",
+                    {"status": "unavailable"},
+                )
+            return self._respond(start_response, "200 OK", {"status": "ready"})
         if path == "/metrics":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])

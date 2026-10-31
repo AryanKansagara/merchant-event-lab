@@ -58,6 +58,19 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(self.store.stock("sku-a"), MAX_STOCK)
         self.assertTrue(self.store.apply("overflow", "sku-b", 1))
 
+    def test_readiness_requires_existing_readable_event_schema(self):
+        self.assertTrue(self.store.is_ready())
+
+        missing = InventoryStore.__new__(InventoryStore)
+        missing.path = Path(self.tmp.name) / "missing.sqlite3"
+        self.assertFalse(missing.is_ready())
+        self.assertFalse(missing.path.exists())
+
+        wrong_schema = InventoryStore.__new__(InventoryStore)
+        wrong_schema.path = Path(self.tmp.name) / "wrong.sqlite3"
+        wrong_schema.path.touch()
+        self.assertFalse(wrong_schema.is_ready())
+
     def test_concurrent_writers_do_not_lose_updates(self):
         def apply(index):
             return InventoryStore(self.db).apply(f"evt-{index}", "sku-a", 1)
