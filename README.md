@@ -132,5 +132,10 @@ The liveness endpoint only reports that the process can dispatch requests;
 readiness separately checks SQLite so an orchestrator can stop routing traffic
 without restarting an otherwise healthy process. Production readiness checks
 should also cover any external dependencies introduced by a real deployment.
+On `SIGTERM` or `SIGINT`, the demo first changes readiness to `503`, then asks
+the server to stop from a separate thread so the current single-threaded request
+can complete without deadlocking `serve_forever`. This is process-local graceful
+shutdown behavior, not a substitute for an orchestrator's readiness polling,
+termination grace period, connection draining, or a production WSGI server.
 Production logging should use a bounded, non-blocking sink with retention and
 redaction controls rather than writing synchronously to standard error.
