@@ -3,10 +3,11 @@ import hmac
 import io
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
-from merchant_event_lab.http import InventoryHTTPApp
+from merchant_event_lab.http import InventoryHTTPApp, _shutdown_handler
 from merchant_event_lab.inventory import InventoryStore
 
 
@@ -249,6 +250,32 @@ class InventoryHTTPAppTests(unittest.TestCase):
 
         status, _, payload = self.request("GET", "/healthz")
         self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
+
+    def test_shutdown_removes_readiness_but_preserves_liveness(self):
+        self.assertTrue(self.app.begin_shutdown())
+        self.assertFalse(self.app.begin_shutdown())
+
+        status, _, payload = self.request("GET", "/readyz")
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"status": "unavailable"}),
+        )
+        status, _, payload = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
+
+    def test_shutdown_signal_starts_server_shutdown_once(self):
+        shutdown_called = threading.Event()
+
+        class Server:
+            def shutdown(self):
+                shutdown_called.set()
+
+        handler = _shutdown_handler(self.app, Server())
+        handler(15, None)
+        self.assertTrue(shutdown_called.wait(timeout=1))
+        shutdown_called.clear()
+        handler(15, None)
+        self.assertFalse(shutdown_called.wait(timeout=0.05))
 
     def test_metrics_are_prometheus_compatible_and_use_bounded_routes(self):
         monotonic_values = iter((1.0, 1.125, 2.0, 2.25, 3.0, 3.375, 4.0, 4.5))

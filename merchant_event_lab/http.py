@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import signal
 import sys
 import threading
 import time
@@ -169,6 +170,15 @@ class InventoryHTTPApp:
         self._span_id_factory = span_id_factory or (lambda: uuid.uuid4().hex[:16])
         self._monotonic_clock = monotonic_clock or time.monotonic
         self._request_metrics = _RequestMetrics()
+        self._shutdown_started = threading.Event()
+
+    def begin_shutdown(self) -> bool:
+        """Remove the process from readiness before the server stops accepting work."""
+
+        if self._shutdown_started.is_set():
+            return False
+        self._shutdown_started.set()
+        return True
 
     def __call__(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         request_id = self._request_id_factory()
@@ -255,7 +265,7 @@ class InventoryHTTPApp:
         if path == "/readyz":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
-            if not self.store.is_ready():
+            if self._shutdown_started.is_set() or not self.store.is_ready():
                 return self._respond(
                     start_response,
                     "503 Service Unavailable",
@@ -409,6 +419,23 @@ def _write_trace_span(event: Mapping[str, object]) -> None:
     print(json.dumps(event, separators=(",", ":"), sort_keys=True), file=sys.stderr, flush=True)
 
 
+def _shutdown_handler(app: InventoryHTTPApp, server: Any) -> Callable[[int, Any], None]:
+    """Build a signal handler that drains the single-threaded demo without deadlock."""
+
+    def handle_shutdown(signum: int, frame: Any) -> None:
+        del signum, frame
+        if not app.begin_shutdown():
+            return
+        # BaseServer.shutdown must run from a different thread than serve_forever.
+        threading.Thread(
+            target=server.shutdown,
+            name="merchant-event-shutdown",
+            daemon=False,
+        ).start()
+
+    return handle_shutdown
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the local merchant-event demo API")
     parser.add_argument("--database", default="inventory.sqlite3")
@@ -443,6 +470,9 @@ def main() -> None:
     except (json.JSONDecodeError, UnicodeEncodeError, ValueError):
         parser.error("MERCHANT_EVENT_SECRETS must map key IDs to string secrets")
     with make_server(args.host, args.port, app) as server:
+        shutdown_handler = _shutdown_handler(app, server)
+        signal.signal(signal.SIGTERM, shutdown_handler)
+        signal.signal(signal.SIGINT, shutdown_handler)
         print(f"Serving local demo on http://{args.host}:{args.port}")
         server.serve_forever()
 
