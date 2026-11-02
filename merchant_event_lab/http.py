@@ -7,6 +7,7 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import sys
 import threading
 import time
@@ -329,6 +330,12 @@ class InventoryHTTPApp:
             return self._respond(start_response, "401 Unauthorized", {"error": "invalid signature"})
         except PayloadError as error:
             return self._respond(start_response, "400 Bad Request", {"error": str(error)})
+        except sqlite3.Error:
+            return self._respond(
+                start_response,
+                "503 Service Unavailable",
+                {"error": "service unavailable"},
+            )
 
         status = "202 Accepted" if applied else "200 OK"
         return self._respond(start_response, status, {"status": "applied" if applied else "replay"})
@@ -356,6 +363,12 @@ class InventoryHTTPApp:
             )
         except ValueError as error:
             return self._respond(start_response, "400 Bad Request", {"error": str(error)})
+        except sqlite3.Error:
+            return self._respond(
+                start_response,
+                "503 Service Unavailable",
+                {"error": "service unavailable"},
+            )
 
         return self._respond(
             start_response,

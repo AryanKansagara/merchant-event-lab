@@ -251,6 +251,36 @@ class InventoryHTTPAppTests(unittest.TestCase):
         status, _, payload = self.request("GET", "/healthz")
         self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
 
+    def test_database_failures_are_sanitized_for_business_routes(self):
+        records = []
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            access_log=records.append,
+            request_id_factory=lambda: "database-failure",
+            clock=lambda: self.now,
+        )
+        self.store.path.unlink()
+
+        status, headers, payload = self.request("GET", "/inventory")
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"error": "service unavailable"}),
+        )
+        self.assertEqual(headers["X-Request-ID"], "database-failure")
+
+        body = b'{"event_id":"restock-1","sku":"demo","delta":4}'
+        status, headers, payload = self.post_event(body)
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"error": "service unavailable"}),
+        )
+        self.assertEqual(headers["X-Request-ID"], "database-failure")
+        self.assertEqual([record["status"] for record in records], [503, 503])
+        serialized = json.dumps([payload, *records])
+        self.assertNotIn("sqlite", serialized.lower())
+        self.assertNotIn(str(self.store.path), serialized)
+
     def test_shutdown_removes_readiness_but_preserves_liveness(self):
         self.assertTrue(self.app.begin_shutdown())
         self.assertFalse(self.app.begin_shutdown())

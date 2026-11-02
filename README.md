@@ -132,6 +132,11 @@ The liveness endpoint only reports that the process can dispatch requests;
 readiness separately checks SQLite so an orchestrator can stop routing traffic
 without restarting an otherwise healthy process. Production readiness checks
 should also cover any external dependencies introduced by a real deployment.
+If SQLite becomes unavailable after startup, the event and inventory routes
+return a generic `503` response instead of exposing database paths or driver
+details. The correlated access record retains the status for operators; the
+local demo deliberately does not implement automatic retries or reconnect
+policy beyond opening a fresh connection for each operation.
 On `SIGTERM` or `SIGINT`, the demo first changes readiness to `503`, then asks
 the server to stop from a separate thread so the current single-threaded request
 can complete without deadlocking `serve_forever`. This is process-local graceful
