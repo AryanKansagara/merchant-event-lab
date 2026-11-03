@@ -143,4 +143,9 @@ can complete without deadlocking `serve_forever`. This is process-local graceful
 shutdown behavior, not a substitute for an orchestrator's readiness polling,
 termination grace period, connection draining, or a production WSGI server.
 Production logging should use a bounded, non-blocking sink with retention and
-redaction controls rather than writing synchronously to standard error.
+redaction controls rather than writing synchronously to standard error. A local
+access-log or trace-exporter failure is isolated after the application has built
+the response so telemetry cannot abort delivery; the bounded
+`merchant_observability_export_failures_total` metric reports these failures by
+`access` or `trace` sink. Production exporters still need their own retry,
+buffering, backpressure, and alerting policies.

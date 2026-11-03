@@ -411,6 +411,41 @@ class InventoryHTTPAppTests(unittest.TestCase):
         self.assertNotIn("secret", serialized)
         self.assertNotIn("signature", serialized)
 
+    def test_observability_sink_failures_do_not_abort_responses(self):
+        attempted = []
+
+        def failing_sink(name):
+            def export(event):
+                attempted.append((name, event["status"]))
+                raise RuntimeError(f"{name} unavailable")
+
+            return export
+
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            access_log=failing_sink("access"),
+            trace_observer=failing_sink("trace"),
+            clock=lambda: self.now,
+        )
+
+        status, headers, payload = self.request("GET", "/healthz")
+        self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
+        self.assertIn("X-Request-ID", headers)
+        self.assertEqual(attempted, [("trace", 200), ("access", 200)])
+
+        status, _, body = self.raw_request("GET", "/metrics")
+        self.assertEqual(status, "200 OK")
+        text = body.decode()
+        self.assertIn(
+            'merchant_observability_export_failures_total{sink="access"} 1',
+            text,
+        )
+        self.assertIn(
+            'merchant_observability_export_failures_total{sink="trace"} 1',
+            text,
+        )
+
     def test_request_id_factory_cannot_inject_response_headers(self):
         self.app = InventoryHTTPApp(
             self.store,
