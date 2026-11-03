@@ -94,6 +94,7 @@ class _RequestMetrics:
 
     def __init__(self) -> None:
         self._values: dict[tuple[str, str, int], tuple[int, float]] = {}
+        self._export_failures = {"access": 0, "trace": 0}
         self._lock = threading.Lock()
 
     def observe(self, method: str, route: str, status: int, duration_seconds: float) -> None:
@@ -102,9 +103,16 @@ class _RequestMetrics:
             count, duration = self._values.get(key, (0, 0.0))
             self._values[key] = (count + 1, duration + max(0.0, duration_seconds))
 
+    def record_export_failure(self, sink: str) -> None:
+        """Count a failed bounded sink without recursively invoking that sink."""
+
+        with self._lock:
+            self._export_failures[sink] += 1
+
     def render(self) -> bytes:
         with self._lock:
             values = sorted(self._values.items())
+            export_failures = self._export_failures.copy()
         lines = [
             "# HELP merchant_http_requests_total HTTP requests completed by bounded route.",
             "# TYPE merchant_http_requests_total counter",
@@ -124,6 +132,16 @@ class _RequestMetrics:
         for (method, route, status), (_, duration) in values:
             labels = f'method="{method}",route="{route}",status="{status}"'
             lines.append(f"merchant_http_request_duration_seconds_sum{{{labels}}} {duration:.6f}")
+        lines.extend(
+            [
+                "# HELP merchant_observability_export_failures_total Failed local observability exports by bounded sink.",
+                "# TYPE merchant_observability_export_failures_total counter",
+            ]
+        )
+        for sink, count in sorted(export_failures.items()):
+            lines.append(
+                f'merchant_observability_export_failures_total{{sink="{sink}"}} {count}'
+            )
         return ("\n".join(lines) + "\n").encode()
 
 
@@ -223,29 +241,46 @@ class InventoryHTTPApp:
         )
         metric_method = method if method in {"GET", "POST"} else "OTHER"
         self._request_metrics.observe(metric_method, route, response_status, duration_seconds)
-        if self._trace_observer is not None:
-            self._trace_observer(
-                {
-                    "duration_ms": round(duration_seconds * 1000, 3),
-                    "method": metric_method,
-                    "parent_span_id": parent_span_id,
-                    "route": route,
-                    "span_id": span_id,
-                    "status": response_status,
-                    "trace_id": trace_id,
-                }
-            )
-        if self._access_log is not None:
-            self._access_log(
-                {
-                    "duration_ms": round(duration_seconds * 1000, 3),
-                    "method": method,
-                    "path": path,
-                    "request_id": request_id,
-                    "status": response_status,
-                }
-            )
+        self._export_observation(
+            "trace",
+            self._trace_observer,
+            {
+                "duration_ms": round(duration_seconds * 1000, 3),
+                "method": metric_method,
+                "parent_span_id": parent_span_id,
+                "route": route,
+                "span_id": span_id,
+                "status": response_status,
+                "trace_id": trace_id,
+            },
+        )
+        self._export_observation(
+            "access",
+            self._access_log,
+            {
+                "duration_ms": round(duration_seconds * 1000, 3),
+                "method": method,
+                "path": path,
+                "request_id": request_id,
+                "status": response_status,
+            },
+        )
         return response
+
+    def _export_observation(
+        self,
+        sink: str,
+        exporter: Callable[[Mapping[str, object]], None] | None,
+        event: Mapping[str, object],
+    ) -> None:
+        """Keep a local telemetry sink failure from aborting a served response."""
+
+        if exporter is None:
+            return
+        try:
+            exporter(event)
+        except Exception:
+            self._request_metrics.record_export_failure(sink)
 
     def _dispatch(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
         path = environ.get("PATH_INFO", "")
