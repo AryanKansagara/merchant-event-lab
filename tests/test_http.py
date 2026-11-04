@@ -200,6 +200,62 @@ class InventoryHTTPAppTests(unittest.TestCase):
                 rate_window_seconds=0,
             )
 
+    def test_request_admission_configuration_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "max_in_flight_requests"):
+            InventoryHTTPApp(
+                self.store,
+                {"current": self.secret},
+                max_in_flight_requests=0,
+            )
+        with self.assertRaisesRegex(ValueError, "overload_retry_after_seconds"):
+            InventoryHTTPApp(
+                self.store,
+                {"current": self.secret},
+                overload_retry_after_seconds=0,
+            )
+
+    def test_business_request_admission_is_bounded_and_recovers(self):
+        entered = threading.Event()
+        release = threading.Event()
+        original_inventory_page = self.store.inventory_page
+
+        def blocking_inventory_page(**options):
+            entered.set()
+            if not release.wait(timeout=1):
+                raise AssertionError("test did not release blocked inventory request")
+            return original_inventory_page(**options)
+
+        self.store.inventory_page = blocking_inventory_page
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            max_in_flight_requests=1,
+            overload_retry_after_seconds=3,
+            clock=lambda: self.now,
+        )
+        first_result = []
+        first = threading.Thread(
+            target=lambda: first_result.append(self.request("GET", "/inventory")),
+            daemon=False,
+        )
+        first.start()
+        self.assertTrue(entered.wait(timeout=1))
+
+        status, headers, payload = self.request("GET", "/inventory")
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"error": "service overloaded"}),
+        )
+        self.assertEqual(headers["Retry-After"], "3")
+        # Operational probes remain available while business capacity is full.
+        self.assertEqual(self.request("GET", "/healthz")[0], "200 OK")
+
+        release.set()
+        first.join(timeout=1)
+        self.assertFalse(first.is_alive())
+        self.assertEqual(first_result[0][0], "200 OK")
+        self.assertEqual(self.request("GET", "/inventory")[0], "200 OK")
+
     def test_inventory_endpoint_returns_filtered_keyset_pages(self):
         self.store.apply("a", "alpha", 1)
         self.store.apply("b", "beta", 5)

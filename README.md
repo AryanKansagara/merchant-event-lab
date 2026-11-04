@@ -97,7 +97,8 @@ Run the local-only demo server with a secret supplied through the environment:
 ```bash
 MERCHANT_EVENT_SECRETS='{"local":"local-demo-only"}' \
   python3 -m merchant_event_lab.http --database inventory.sqlite3 --port 8000 \
-  --event-rate-limit 60 --rate-window-seconds 60
+  --event-rate-limit 60 --rate-window-seconds 60 \
+  --max-in-flight-requests 32 --overload-retry-after-seconds 1
 ```
 
 For example, sign the exact body bytes and submit one synthetic restock:
@@ -127,7 +128,14 @@ distributed rate limiting, an external trace collector, or durable log
 shipping. Its single global in-process rate bucket is intentionally narrow:
 restarts reset it and multiple workers do not share state. Production deployments
 should enforce distributed tenant-aware limits at a trusted edge, with careful
-proxy identity handling.
+proxy identity handling. The reusable WSGI app also bounds concurrent event and
+inventory work with a thread-safe process-local admission counter. Once full,
+it returns a generic `503` with `Retry-After` before touching SQLite; health,
+readiness, and metrics remain available for operators. Capacity is released
+after every successful or failed dispatch. The bundled server is
+single-threaded, so this matters when the app is embedded in a concurrent WSGI
+host. It is not a distributed queue, request deadline, tenant quota, or
+substitute for trusted-edge load shedding.
 The liveness endpoint only reports that the process can dispatch requests;
 readiness separately checks SQLite so an orchestrator can stop routing traffic
 without restarting an otherwise healthy process. Production readiness checks

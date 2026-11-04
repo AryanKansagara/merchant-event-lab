@@ -89,6 +89,30 @@ class _FixedWindowRateLimiter:
             return True, retry_after
 
 
+class _ConcurrencyLimiter:
+    """Thread-safe, process-local admission bound for business requests."""
+
+    def __init__(self, limit: int):
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("max_in_flight_requests must be a positive integer")
+        self.limit = limit
+        self._in_flight = 0
+        self._lock = threading.Lock()
+
+    def acquire(self) -> bool:
+        with self._lock:
+            if self._in_flight >= self.limit:
+                return False
+            self._in_flight += 1
+            return True
+
+    def release(self) -> None:
+        with self._lock:
+            if self._in_flight <= 0:
+                raise RuntimeError("request admission permit released without acquire")
+            self._in_flight -= 1
+
+
 class _RequestMetrics:
     """Thread-safe, bounded-label request metrics for the local demo."""
 
@@ -161,6 +185,8 @@ class InventoryHTTPApp:
         max_age_seconds: int = 5 * 60,
         event_rate_limit: int = 60,
         rate_window_seconds: int = 60,
+        max_in_flight_requests: int = 32,
+        overload_retry_after_seconds: int = 1,
         clock: Callable[[], float] | None = None,
         access_log: Callable[[Mapping[str, object]], None] | None = None,
         trace_observer: Callable[[Mapping[str, object]], None] | None = None,
@@ -182,6 +208,10 @@ class InventoryHTTPApp:
             rate_window_seconds,
             selected_clock,
         )
+        self._request_admission = _ConcurrencyLimiter(max_in_flight_requests)
+        if type(overload_retry_after_seconds) is not int or overload_retry_after_seconds <= 0:
+            raise ValueError("overload_retry_after_seconds must be a positive integer")
+        self._overload_retry_after_seconds = overload_retry_after_seconds
         self._access_log = access_log
         self._trace_observer = trace_observer
         self._request_id_factory = request_id_factory or (lambda: uuid.uuid4().hex)
@@ -230,10 +260,24 @@ class InventoryHTTPApp:
                 [*headers, ("X-Request-ID", request_id), ("traceparent", response_traceparent)],
             )
 
-        response = self._dispatch(environ, observed_start_response)
+        path = environ.get("PATH_INFO", "")
+        admission_required = path in {"/events", "/inventory"}
+        admitted = not admission_required or self._request_admission.acquire()
+        try:
+            if admitted:
+                response = self._dispatch(environ, observed_start_response)
+            else:
+                response = self._respond(
+                    observed_start_response,
+                    "503 Service Unavailable",
+                    {"error": "service overloaded"},
+                    [("Retry-After", str(self._overload_retry_after_seconds))],
+                )
+        finally:
+            if admission_required and admitted:
+                self._request_admission.release()
         duration_seconds = max(0.0, self._monotonic_clock() - started)
         method = environ.get("REQUEST_METHOD", "").upper()
-        path = environ.get("PATH_INFO", "")
         route = (
             path
             if path in {"/events", "/inventory", "/healthz", "/readyz", "/metrics"}
@@ -491,6 +535,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--event-rate-limit", type=_positive_int, default=60)
     parser.add_argument("--rate-window-seconds", type=_positive_int, default=60)
+    parser.add_argument("--max-in-flight-requests", type=_positive_int, default=32)
+    parser.add_argument("--overload-retry-after-seconds", type=_positive_int, default=1)
     args = parser.parse_args()
 
     raw_secrets = os.environ.get("MERCHANT_EVENT_SECRETS")
@@ -512,6 +558,8 @@ def main() -> None:
             secrets,
             event_rate_limit=args.event_rate_limit,
             rate_window_seconds=args.rate_window_seconds,
+            max_in_flight_requests=args.max_in_flight_requests,
+            overload_retry_after_seconds=args.overload_retry_after_seconds,
             access_log=_write_access_log,
             trace_observer=_write_trace_span,
         )
