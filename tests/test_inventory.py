@@ -5,6 +5,7 @@ from pathlib import Path
 
 from merchant_event_lab.inventory import (
     MAX_STOCK,
+    InventoryEvent,
     InventoryPosition,
     InventoryStore,
 )
@@ -135,6 +136,38 @@ class InventoryStoreTests(unittest.TestCase):
             with self.subTest(options=options):
                 with self.assertRaises(ValueError):
                     self.store.inventory_page(**options)
+
+    def test_event_page_is_ordered_filtered_and_uses_keyset_cursor(self):
+        for event_id, sku, delta in [
+            ("event-c", "sku-a", 3),
+            ("event-a", "sku-a", 1),
+            ("event-b", "sku-b", 2),
+        ]:
+            self.store.apply(event_id, sku, delta)
+
+        first = self.store.event_page(limit=1, sku="sku-a")
+        self.assertEqual(first.items, (InventoryEvent("event-a", "sku-a", 1),))
+        self.assertEqual(first.next_cursor, "event-a")
+
+        second = self.store.event_page(
+            limit=2,
+            sku="sku-a",
+            after_event_id=first.next_cursor,
+        )
+        self.assertEqual(second.items, (InventoryEvent("event-c", "sku-a", 3),))
+        self.assertIsNone(second.next_cursor)
+
+    def test_event_page_rejects_invalid_options(self):
+        for options in (
+            {"limit": 0},
+            {"limit": 1001},
+            {"limit": True},
+            {"after_event_id": ""},
+            {"sku": ""},
+        ):
+            with self.subTest(options=options):
+                with self.assertRaises(ValueError):
+                    self.store.event_page(**options)
 
 
 if __name__ == "__main__":

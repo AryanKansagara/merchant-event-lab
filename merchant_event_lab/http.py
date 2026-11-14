@@ -331,9 +331,11 @@ class InventoryHTTPApp:
         method = environ.get("REQUEST_METHOD", "").upper()
 
         if path == "/events":
-            if method != "POST":
-                return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "POST")])
-            return self._post_event(environ, start_response)
+            if method == "POST":
+                return self._post_event(environ, start_response)
+            if method == "GET":
+                return self._get_events(environ, start_response)
+            return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET, POST")])
         if path == "/inventory":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
@@ -456,6 +458,46 @@ class InventoryHTTPApp:
                 "items": [
                     {"sku": position.sku, "stock": position.stock}
                     for position in page.items
+                ],
+                "next_cursor": page.next_cursor,
+            },
+        )
+
+    def _get_events(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        try:
+            query = parse_qs(
+                environ.get("QUERY_STRING", ""),
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=3,
+            )
+            unknown = set(query) - {"limit", "after_event_id", "sku"}
+            if unknown or any(len(values) != 1 for values in query.values()):
+                raise ValueError("query parameters must be unique and supported")
+            parsed_limit = self._query_int(query, "limit", default=100)
+            if parsed_limit is None:  # The non-None default makes this unreachable.
+                raise ValueError("limit is required")
+            page = self.store.event_page(
+                limit=parsed_limit,
+                after_event_id=query.get("after_event_id", [None])[0],
+                sku=query.get("sku", [None])[0],
+            )
+        except ValueError as error:
+            return self._respond(start_response, "400 Bad Request", {"error": str(error)})
+        except sqlite3.Error:
+            return self._respond(
+                start_response,
+                "503 Service Unavailable",
+                {"error": "service unavailable"},
+            )
+
+        return self._respond(
+            start_response,
+            "200 OK",
+            {
+                "items": [
+                    {"event_id": event.event_id, "sku": event.sku, "delta": event.delta}
+                    for event in page.items
                 ],
                 "next_cursor": page.next_cursor,
             },
