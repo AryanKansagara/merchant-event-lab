@@ -25,6 +25,23 @@ class InventoryPage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class InventoryEvent:
+    """One immutable inventory change from the event ledger."""
+
+    event_id: str
+    sku: str
+    delta: int
+
+
+@dataclass(frozen=True)
+class EventPage:
+    """A deterministic event-ID-keyset-paginated audit page."""
+
+    items: tuple[InventoryEvent, ...]
+    next_cursor: str | None
+
+
 class InventoryStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -34,6 +51,10 @@ class InventoryStore:
                 sku TEXT NOT NULL,
                 delta INTEGER NOT NULL CHECK(delta != 0)
             )""")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_events_sku_event_id "
+                "ON events (sku, event_id)"
+            )
 
     def apply(self, event_id: str, sku: str, delta: int) -> bool:
         """Apply a stock change; return False for an exact replay.
@@ -152,4 +173,55 @@ class InventoryStore:
         return InventoryPage(
             items=items,
             next_cursor=items[-1].sku if has_more else None,
+        )
+
+    def event_page(
+        self,
+        *,
+        limit: int = 100,
+        after_event_id: str | None = None,
+        sku: str | None = None,
+    ) -> EventPage:
+        """Return immutable events ordered by event ID using keyset pagination.
+
+        The optional SKU filter is applied before pagination. A page is
+        read-consistent, but separate pages are not a snapshot when new events
+        are accepted between requests.
+        """
+
+        if type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("limit must be an integer from 1 to 1000")
+        if after_event_id is not None and (
+            not isinstance(after_event_id, str) or not after_event_id.strip()
+        ):
+            raise ValueError("after_event_id must be a non-empty string")
+        if sku is not None and (not isinstance(sku, str) or not sku.strip()):
+            raise ValueError("sku must be a non-empty string")
+
+        filters: list[str] = []
+        parameters: list[str | int] = []
+        if after_event_id is not None:
+            filters.append("event_id > ?")
+            parameters.append(after_event_id)
+        if sku is not None:
+            filters.append("sku = ?")
+            parameters.append(sku)
+        where = f"WHERE {' AND '.join(filters)}" if filters else ""
+        parameters.append(limit + 1)
+
+        with closing(sqlite3.connect(self.path)) as db, db:
+            rows = db.execute(
+                f"""SELECT event_id, sku, delta
+                    FROM events
+                    {where}
+                    ORDER BY event_id
+                    LIMIT ?""",
+                parameters,
+            ).fetchall()
+
+        has_more = len(rows) > limit
+        items = tuple(InventoryEvent(*row) for row in rows[:limit])
+        return EventPage(
+            items=items,
+            next_cursor=items[-1].event_id if has_more else None,
         )

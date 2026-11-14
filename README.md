@@ -68,6 +68,8 @@ services:
   `X-Event-Key-Id`, `X-Event-Timestamp`, and `X-Event-Signature`; it reports new
   events as `202` and exact replays as `200`. The demo applies a process-local
   fixed-window request limit and returns `429` with `Retry-After` when full.
+- `GET /events?limit=100&after_event_id=...&sku=...` returns an immutable
+  event-audit view ordered by event ID, with optional exact-SKU filtering.
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON.
 - `GET /healthz` provides a process-level health response.
@@ -91,6 +93,12 @@ normalized method/route labels, status, duration, trace ID, span ID, and optiona
 parent span ID. It never records query strings, arbitrary paths, request bodies,
 event data, or baggage. Applications can replace the injectable observer with a
 real non-blocking trace exporter.
+
+Event-audit pages use event-ID keyset pagination. Each page is read-consistent,
+but separate pages are not a database snapshot when ingestion continues between
+requests. The route exposes synthetic identifiers and deltas for local audit
+demonstration only; a production service would require tenant-scoped
+authorization and a retention policy.
 
 Run the local-only demo server with a secret supplied through the environment:
 
