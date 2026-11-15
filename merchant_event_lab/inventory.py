@@ -101,6 +101,18 @@ class InventoryStore:
                 "SELECT COALESCE(SUM(delta), 0) FROM events WHERE sku = ?", (sku,)
             ).fetchone()[0]
 
+    def event(self, event_id: str) -> InventoryEvent | None:
+        """Return one immutable event by its exact ID, or ``None`` when absent."""
+
+        if not isinstance(event_id, str) or not event_id.strip():
+            raise ValueError("event_id must be a non-empty string")
+        with closing(sqlite3.connect(self.path)) as db, db:
+            row = db.execute(
+                "SELECT event_id, sku, delta FROM events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+        return InventoryEvent(*row) if row is not None else None
+
     def is_ready(self) -> bool:
         """Return whether the existing database and event schema are readable.
 

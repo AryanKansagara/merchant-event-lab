@@ -157,6 +157,19 @@ class InventoryStoreTests(unittest.TestCase):
         self.assertEqual(second.items, (InventoryEvent("event-c", "sku-a", 3),))
         self.assertIsNone(second.next_cursor)
 
+    def test_event_returns_exact_immutable_record_or_none(self):
+        self.store.apply("event-a", "sku-a", 4)
+
+        self.assertEqual(
+            self.store.event("event-a"),
+            InventoryEvent("event-a", "sku-a", 4),
+        )
+        self.assertIsNone(self.store.event("missing"))
+        for invalid in ("", "   "):
+            with self.subTest(event_id=invalid):
+                with self.assertRaisesRegex(ValueError, "non-empty string"):
+                    self.store.event(invalid)
+
     def test_event_page_rejects_invalid_options(self):
         for options in (
             {"limit": 0},

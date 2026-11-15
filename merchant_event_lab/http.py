@@ -261,7 +261,7 @@ class InventoryHTTPApp:
             )
 
         path = environ.get("PATH_INFO", "")
-        admission_required = path in {"/events", "/inventory"}
+        admission_required = path in {"/event", "/events", "/inventory"}
         admitted = not admission_required or self._request_admission.acquire()
         try:
             if admitted:
@@ -280,7 +280,7 @@ class InventoryHTTPApp:
         method = environ.get("REQUEST_METHOD", "").upper()
         route = (
             path
-            if path in {"/events", "/inventory", "/healthz", "/readyz", "/metrics"}
+            if path in {"/event", "/events", "/inventory", "/healthz", "/readyz", "/metrics"}
             else "unknown"
         )
         metric_method = method if method in {"GET", "POST"} else "OTHER"
@@ -336,6 +336,10 @@ class InventoryHTTPApp:
             if method == "GET":
                 return self._get_events(environ, start_response)
             return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET, POST")])
+        if path == "/event":
+            if method != "GET":
+                return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
+            return self._get_event(environ, start_response)
         if path == "/inventory":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
@@ -501,6 +505,34 @@ class InventoryHTTPApp:
                 ],
                 "next_cursor": page.next_cursor,
             },
+        )
+
+    def _get_event(self, environ: dict[str, Any], start_response: StartResponse) -> Iterable[bytes]:
+        try:
+            query = parse_qs(
+                environ.get("QUERY_STRING", ""),
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=1,
+            )
+            if set(query) != {"event_id"} or len(query["event_id"]) != 1:
+                raise ValueError("event_id must be the only query parameter")
+            event = self.store.event(query["event_id"][0])
+        except ValueError as error:
+            return self._respond(start_response, "400 Bad Request", {"error": str(error)})
+        except sqlite3.Error:
+            return self._respond(
+                start_response,
+                "503 Service Unavailable",
+                {"error": "service unavailable"},
+            )
+
+        if event is None:
+            return self._respond(start_response, "404 Not Found", {"error": "event not found"})
+        return self._respond(
+            start_response,
+            "200 OK",
+            {"event_id": event.event_id, "sku": event.sku, "delta": event.delta},
         )
 
     @staticmethod
