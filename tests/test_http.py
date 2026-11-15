@@ -312,6 +312,32 @@ class InventoryHTTPAppTests(unittest.TestCase):
                 self.assertEqual(status, "400 Bad Request")
                 self.assertIn("error", payload)
 
+    def test_event_detail_endpoint_returns_exact_record_and_not_found(self):
+        self.store.apply("event-a", "alpha", 3)
+
+        status, _, payload = self.request("GET", "/event", query="event_id=event-a")
+        self.assertEqual(
+            (status, payload),
+            ("200 OK", {"delta": 3, "event_id": "event-a", "sku": "alpha"}),
+        )
+
+        status, _, payload = self.request("GET", "/event", query="event_id=missing")
+        self.assertEqual(
+            (status, payload),
+            ("404 Not Found", {"error": "event not found"}),
+        )
+
+    def test_event_detail_endpoint_enforces_query_and_method_contract(self):
+        for query in ("", "event_id=", "event_id=a&event_id=b", "event_id=a&extra=b"):
+            with self.subTest(query=query):
+                status, _, payload = self.request("GET", "/event", query=query)
+                self.assertEqual(status, "400 Bad Request")
+                self.assertIn("error", payload)
+
+        status, headers, _ = self.request("POST", "/event", query="event_id=a")
+        self.assertEqual(status, "405 Method Not Allowed")
+        self.assertEqual(headers["Allow"], "GET")
+
     def test_routing_health_and_method_contracts(self):
         status, _, payload = self.request("GET", "/healthz")
         self.assertEqual((status, payload), ("200 OK", {"status": "ok"}))
@@ -368,6 +394,13 @@ class InventoryHTTPAppTests(unittest.TestCase):
         )
         self.assertEqual(headers["X-Request-ID"], "database-failure")
 
+        status, headers, payload = self.request("GET", "/event", query="event_id=private")
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"error": "service unavailable"}),
+        )
+        self.assertEqual(headers["X-Request-ID"], "database-failure")
+
         body = b'{"event_id":"restock-1","sku":"demo","delta":4}'
         status, headers, payload = self.post_event(body)
         self.assertEqual(
@@ -375,7 +408,7 @@ class InventoryHTTPAppTests(unittest.TestCase):
             ("503 Service Unavailable", {"error": "service unavailable"}),
         )
         self.assertEqual(headers["X-Request-ID"], "database-failure")
-        self.assertEqual([record["status"] for record in records], [503, 503, 503])
+        self.assertEqual([record["status"] for record in records], [503, 503, 503, 503])
         serialized = json.dumps([payload, *records])
         self.assertNotIn("sqlite", serialized.lower())
         self.assertNotIn(str(self.store.path), serialized)

@@ -70,6 +70,8 @@ services:
   fixed-window request limit and returns `429` with `Retry-After` when full.
 - `GET /events?limit=100&after_event_id=...&sku=...` returns an immutable
   event-audit view ordered by event ID, with optional exact-SKU filtering.
+- `GET /event?event_id=...` returns one immutable event by exact ID, or `404`
+  when it is absent.
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON.
 - `GET /healthz` provides a process-level health response.
@@ -94,7 +96,8 @@ parent span ID. It never records query strings, arbitrary paths, request bodies,
 event data, or baggage. Applications can replace the injectable observer with a
 real non-blocking trace exporter.
 
-Event-audit pages use event-ID keyset pagination. Each page is read-consistent,
+Event-audit pages use event-ID keyset pagination, while exact lookup uses the
+same immutable ledger record without scanning a page. Each page is read-consistent,
 but separate pages are not a database snapshot when ingestion continues between
 requests. The route exposes synthetic identifiers and deltas for local audit
 demonstration only; a production service would require tenant-scoped
