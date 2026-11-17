@@ -38,6 +38,7 @@ class InventoryHTTPAppTests(unittest.TestCase):
         key_id="current",
         timestamp=None,
         content_length=None,
+        authorization=None,
     ):
         captured = {}
 
@@ -56,6 +57,8 @@ class InventoryHTTPAppTests(unittest.TestCase):
             "HTTP_X_EVENT_TIMESTAMP": self.timestamp if timestamp is None else timestamp,
             "wsgi.input": io.BytesIO(body),
         }
+        if authorization is not None:
+            environ["HTTP_AUTHORIZATION"] = authorization
         response_body = b"".join(self.app(environ, start_response))
         self.assertEqual(int(captured["headers"]["Content-Length"]), len(response_body))
         self.assertEqual(captured["headers"]["Cache-Control"], "no-store")
@@ -337,6 +340,55 @@ class InventoryHTTPAppTests(unittest.TestCase):
         status, headers, _ = self.request("POST", "/event", query="event_id=a")
         self.assertEqual(status, "405 Method Not Allowed")
         self.assertEqual(headers["Allow"], "GET")
+
+    def test_optional_audit_token_protects_business_reads_only(self):
+        self.store.apply("event-a", "alpha", 3)
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            audit_token="audit-secret",
+            clock=lambda: self.now,
+        )
+
+        for path, query in (
+            ("/inventory", ""),
+            ("/events", ""),
+            ("/event", "event_id=event-a"),
+        ):
+            with self.subTest(path=path):
+                status, headers, payload = self.request("GET", path, query=query)
+                self.assertEqual(
+                    (status, payload),
+                    ("401 Unauthorized", {"error": "authentication required"}),
+                )
+                self.assertEqual(headers["WWW-Authenticate"], "Bearer")
+                self.assertEqual(
+                    self.request(
+                        "GET",
+                        path,
+                        query=query,
+                        authorization="Bearer wrong-secret",
+                    )[0],
+                    "401 Unauthorized",
+                )
+                self.assertEqual(
+                    self.request(
+                        "GET",
+                        path,
+                        query=query,
+                        authorization="Bearer audit-secret",
+                    )[0],
+                    "200 OK",
+                )
+
+        self.assertEqual(self.request("GET", "/healthz")[0], "200 OK")
+        self.assertEqual(self.request("GET", "/readyz")[0], "200 OK")
+        body = b'{"event_id":"event-b","sku":"alpha","delta":1}'
+        self.assertEqual(self.post_event(body)[0], "202 Accepted")
+
+    def test_audit_token_configuration_must_not_be_empty(self):
+        with self.assertRaisesRegex(ValueError, "audit_token"):
+            InventoryHTTPApp(self.store, {"current": self.secret}, audit_token="")
 
     def test_routing_health_and_method_contracts(self):
         status, _, payload = self.request("GET", "/healthz")

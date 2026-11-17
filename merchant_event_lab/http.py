@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hmac
 import json
 import os
 import re
@@ -187,6 +188,7 @@ class InventoryHTTPApp:
         rate_window_seconds: int = 60,
         max_in_flight_requests: int = 32,
         overload_retry_after_seconds: int = 1,
+        audit_token: str | None = None,
         clock: Callable[[], float] | None = None,
         access_log: Callable[[Mapping[str, object]], None] | None = None,
         trace_observer: Callable[[Mapping[str, object]], None] | None = None,
@@ -212,6 +214,13 @@ class InventoryHTTPApp:
         if type(overload_retry_after_seconds) is not int or overload_retry_after_seconds <= 0:
             raise ValueError("overload_retry_after_seconds must be a positive integer")
         self._overload_retry_after_seconds = overload_retry_after_seconds
+        if audit_token is not None and (
+            not isinstance(audit_token, str) or not audit_token
+        ):
+            raise ValueError("audit_token must be a non-empty string when configured")
+        self._audit_authorization = (
+            None if audit_token is None else f"Bearer {audit_token}".encode("utf-8")
+        )
         self._access_log = access_log
         self._trace_observer = trace_observer
         self._request_id_factory = request_id_factory or (lambda: uuid.uuid4().hex)
@@ -334,15 +343,21 @@ class InventoryHTTPApp:
             if method == "POST":
                 return self._post_event(environ, start_response)
             if method == "GET":
+                if not self._audit_authorized(environ):
+                    return self._audit_unauthorized(start_response)
                 return self._get_events(environ, start_response)
             return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET, POST")])
         if path == "/event":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
+            if not self._audit_authorized(environ):
+                return self._audit_unauthorized(start_response)
             return self._get_event(environ, start_response)
         if path == "/inventory":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
+            if not self._audit_authorized(environ):
+                return self._audit_unauthorized(start_response)
             return self._get_inventory(environ, start_response)
         if path == "/healthz":
             if method != "GET":
@@ -363,6 +378,22 @@ class InventoryHTTPApp:
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
             return self._metrics(start_response)
         return self._respond(start_response, "404 Not Found", {"error": "not found"})
+
+    def _audit_authorized(self, environ: Mapping[str, Any]) -> bool:
+        if self._audit_authorization is None:
+            return True
+        supplied = environ.get("HTTP_AUTHORIZATION")
+        if not isinstance(supplied, str):
+            return False
+        return hmac.compare_digest(supplied.encode("utf-8"), self._audit_authorization)
+
+    def _audit_unauthorized(self, start_response: StartResponse) -> list[bytes]:
+        return self._respond(
+            start_response,
+            "401 Unauthorized",
+            {"error": "authentication required"},
+            [("WWW-Authenticate", "Bearer")],
+        )
 
     def _metrics(self, start_response: StartResponse) -> list[bytes]:
         body = self._request_metrics.render()
@@ -616,6 +647,9 @@ def main() -> None:
     raw_secrets = os.environ.get("MERCHANT_EVENT_SECRETS")
     if not raw_secrets:
         parser.error("MERCHANT_EVENT_SECRETS must be set to a JSON object")
+    audit_token = os.environ.get("MERCHANT_AUDIT_TOKEN")
+    if audit_token == "":
+        parser.error("MERCHANT_AUDIT_TOKEN must be non-empty when set")
     try:
         decoded_secrets = json.loads(raw_secrets)
         if not isinstance(decoded_secrets, dict) or not decoded_secrets:
@@ -634,6 +668,7 @@ def main() -> None:
             rate_window_seconds=args.rate_window_seconds,
             max_in_flight_requests=args.max_in_flight_requests,
             overload_retry_after_seconds=args.overload_retry_after_seconds,
+            audit_token=audit_token,
             access_log=_write_access_log,
             trace_observer=_write_trace_span,
         )
