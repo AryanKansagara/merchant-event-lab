@@ -69,11 +69,13 @@ services:
   events as `202` and exact replays as `200`. The demo applies a process-local
   fixed-window request limit and returns `429` with `Retry-After` when full.
 - `GET /events?limit=100&after_event_id=...&sku=...` returns an immutable
-  event-audit view ordered by event ID, with optional exact-SKU filtering.
+  event-audit view ordered by event ID, with optional exact-SKU filtering. When
+  `MERCHANT_AUDIT_TOKEN` is configured, this route requires its bearer token.
 - `GET /event?event_id=...` returns one immutable event by exact ID, or `404`
-  when it is absent.
+  when it is absent. It uses the same optional bearer authentication.
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
-  operational read model as deterministic JSON.
+  operational read model as deterministic JSON and uses the same optional
+  bearer authentication.
 - `GET /healthz` provides a process-level health response.
 - `GET /readyz` verifies that the existing SQLite database and expected event
   schema are readable, returning `503` without leaking database details when
@@ -107,6 +109,7 @@ Run the local-only demo server with a secret supplied through the environment:
 
 ```bash
 MERCHANT_EVENT_SECRETS='{"local":"local-demo-only"}' \
+MERCHANT_AUDIT_TOKEN='local-audit-demo-only' \
   python3 -m merchant_event_lab.http --database inventory.sqlite3 --port 8000 \
   --event-rate-limit 60 --rate-window-seconds 60 \
   --max-in-flight-requests 32 --overload-retry-after-seconds 1
@@ -124,8 +127,17 @@ curl -i http://127.0.0.1:8000/events \
   -H "X-Event-Timestamp: $timestamp" \
   -H "X-Event-Signature: $signature" \
   --data-binary "$body"
-curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5'
+curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5' \
+  -H "Authorization: Bearer $MERCHANT_AUDIT_TOKEN"
 ```
+
+With `MERCHANT_AUDIT_TOKEN` set, the three business read routes require the
+exact bearer value in the `Authorization` header. Health, readiness, metrics,
+and signed event ingestion remain outside this optional read-token check. The
+bearer value is compared in constant time, but this local demo still serves
+plaintext HTTP and has one process-wide credential rather than tenant-scoped
+authorization. Put real authentication behind TLS and a managed identity or
+secret system; do not place credentials in URLs or logs.
 
 Metrics normalize every unknown path to an `unknown` route label instead of
 recording user-controlled path values. They contain no query strings, request
