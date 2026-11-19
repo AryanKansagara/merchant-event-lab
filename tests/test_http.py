@@ -279,6 +279,65 @@ class InventoryHTTPAppTests(unittest.TestCase):
                 self.assertEqual(status, "400 Bad Request")
                 self.assertIn("error", payload)
 
+    def test_inventory_summary_endpoint_returns_bounded_aggregate(self):
+        self.store.apply("restock-a", "alpha", 3)
+        self.store.apply("sale-a", "alpha", -3)
+        self.store.apply("restock-b", "beta", 2)
+        self.store.apply("restock-c", "gamma", 8)
+
+        status, _, payload = self.request(
+            "GET",
+            "/inventory-summary",
+            query="low_stock_at=2",
+        )
+
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(
+            payload,
+            {
+                "low_stock_at": 2,
+                "low_stock_sku_count": 2,
+                "sku_count": 3,
+                "total_stock": 10,
+                "zero_stock_sku_count": 1,
+            },
+        )
+
+    def test_inventory_summary_endpoint_enforces_query_method_and_auth(self):
+        for query in ("", "low_stock_at=", "low_stock_at=-1", "low_stock_at=1&extra=2"):
+            with self.subTest(query=query):
+                status, _, payload = self.request("GET", "/inventory-summary", query=query)
+                self.assertEqual(status, "400 Bad Request")
+                self.assertIn("error", payload)
+
+        status, headers, _ = self.request(
+            "POST",
+            "/inventory-summary",
+            query="low_stock_at=2",
+        )
+        self.assertEqual(status, "405 Method Not Allowed")
+        self.assertEqual(headers["Allow"], "GET")
+
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            audit_token="audit-secret",
+            clock=lambda: self.now,
+        )
+        self.assertEqual(
+            self.request("GET", "/inventory-summary", query="low_stock_at=2")[0],
+            "401 Unauthorized",
+        )
+        self.assertEqual(
+            self.request(
+                "GET",
+                "/inventory-summary",
+                query="low_stock_at=2",
+                authorization="Bearer audit-secret",
+            )[0],
+            "200 OK",
+        )
+
     def test_event_audit_endpoint_returns_filtered_keyset_pages(self):
         self.store.apply("event-c", "alpha", 3)
         self.store.apply("event-a", "alpha", 1)
@@ -352,6 +411,7 @@ class InventoryHTTPAppTests(unittest.TestCase):
 
         for path, query in (
             ("/inventory", ""),
+            ("/inventory-summary", "low_stock_at=2"),
             ("/events", ""),
             ("/event", "event_id=event-a"),
         ):

@@ -8,6 +8,7 @@ from merchant_event_lab.inventory import (
     InventoryEvent,
     InventoryPosition,
     InventoryStore,
+    InventorySummary,
 )
 
 
@@ -136,6 +137,33 @@ class InventoryStoreTests(unittest.TestCase):
             with self.subTest(options=options):
                 with self.assertRaises(ValueError):
                     self.store.inventory_page(**options)
+
+    def test_inventory_summary_is_read_consistent_and_overflow_safe(self):
+        self.store.apply("max-a", "sku-a", MAX_STOCK)
+        self.store.apply("max-b", "sku-b", MAX_STOCK)
+        self.store.apply("restock-c", "sku-c", 2)
+        self.store.apply("sell-c", "sku-c", -2)
+
+        self.assertEqual(
+            self.store.inventory_summary(low_stock_at=1),
+            InventorySummary(
+                sku_count=3,
+                total_stock=MAX_STOCK * 2,
+                zero_stock_sku_count=1,
+                low_stock_sku_count=1,
+                low_stock_at=1,
+            ),
+        )
+
+    def test_inventory_summary_validates_threshold_and_handles_empty_catalog(self):
+        self.assertEqual(
+            self.store.inventory_summary(low_stock_at=0),
+            InventorySummary(0, 0, 0, 0, 0),
+        )
+        for threshold in (-1, True, MAX_STOCK + 1):
+            with self.subTest(threshold=threshold):
+                with self.assertRaisesRegex(ValueError, "low_stock_at"):
+                    self.store.inventory_summary(low_stock_at=threshold)
 
     def test_event_page_is_ordered_filtered_and_uses_keyset_cursor(self):
         for event_id, sku, delta in [
