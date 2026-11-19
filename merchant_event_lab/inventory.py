@@ -18,6 +18,17 @@ class InventoryPosition:
 
 
 @dataclass(frozen=True)
+class InventorySummary:
+    """One read-consistent aggregate view of current inventory positions."""
+
+    sku_count: int
+    total_stock: int
+    zero_stock_sku_count: int
+    low_stock_sku_count: int
+    low_stock_at: int
+
+
+@dataclass(frozen=True)
 class InventoryPage:
     """A deterministic keyset-paginated inventory page."""
 
@@ -185,6 +196,40 @@ class InventoryStore:
         return InventoryPage(
             items=items,
             next_cursor=items[-1].sku if has_more else None,
+        )
+
+    def inventory_summary(self, *, low_stock_at: int) -> InventorySummary:
+        """Summarize current inventory in one read-consistent SQLite snapshot.
+
+        Totals are accumulated in Python so a catalog whose individually valid
+        positions sum beyond SQLite's signed 64-bit range remains reportable.
+        """
+
+        if type(low_stock_at) is not int or not 0 <= low_stock_at <= MAX_STOCK:
+            raise ValueError("low_stock_at must be a non-negative 64-bit integer")
+
+        sku_count = 0
+        total_stock = 0
+        zero_stock_sku_count = 0
+        low_stock_sku_count = 0
+        with closing(sqlite3.connect(self.path)) as db, db:
+            rows = db.execute(
+                """SELECT sku, SUM(delta) AS stock
+                    FROM events
+                    GROUP BY sku"""
+            )
+            for _, stock in rows:
+                sku_count += 1
+                total_stock += stock
+                zero_stock_sku_count += stock == 0
+                low_stock_sku_count += stock <= low_stock_at
+
+        return InventorySummary(
+            sku_count=sku_count,
+            total_stock=total_stock,
+            zero_stock_sku_count=zero_stock_sku_count,
+            low_stock_sku_count=low_stock_sku_count,
+            low_stock_at=low_stock_at,
         )
 
     def event_page(

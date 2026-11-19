@@ -76,6 +76,10 @@ services:
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON and uses the same optional
   bearer authentication.
+- `GET /inventory-summary?low_stock_at=...` returns one read-consistent
+  aggregate with SKU count, total stock units, and zero/low-stock SKU counts.
+  It uses the same optional bearer authentication and accumulates catalog-wide
+  totals in Python so they are not limited to signed 64-bit units.
 - `GET /healthz` provides a process-level health response.
 - `GET /readyz` verifies that the existing SQLite database and expected event
   schema are readable, returning `503` without leaking database details when
@@ -131,13 +135,18 @@ curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5' \
   -H "Authorization: Bearer $MERCHANT_AUDIT_TOKEN"
 ```
 
-With `MERCHANT_AUDIT_TOKEN` set, the three business read routes require the
+With `MERCHANT_AUDIT_TOKEN` set, the four business read routes require the
 exact bearer value in the `Authorization` header. Health, readiness, metrics,
 and signed event ingestion remain outside this optional read-token check. The
 bearer value is compared in constant time, but this local demo still serves
 plaintext HTTP and has one process-wide credential rather than tenant-scoped
 authorization. Put real authentication behind TLS and a managed identity or
 secret system; do not place credentials in URLs or logs.
+
+The inventory summary is a bounded synthetic operational diagnostic, not a
+valuation, availability promise, reorder recommendation, or substitute for a
+warehouse system. Its counts reflect one SQLite read snapshot; the next request
+may differ as new events arrive.
 
 Metrics normalize every unknown path to an `unknown` route label instead of
 recording user-controlled path values. They contain no query strings, request
