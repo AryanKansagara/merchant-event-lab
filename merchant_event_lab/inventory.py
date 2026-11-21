@@ -29,6 +29,20 @@ class InventorySummary:
 
 
 @dataclass(frozen=True)
+class EventSummary:
+    """One read-consistent aggregate view of accepted inventory events."""
+
+    event_count: int
+    sku_count: int
+    restock_event_count: int
+    restocked_units: int
+    sale_event_count: int
+    sold_units: int
+    net_units: int
+    sku: str | None
+
+
+@dataclass(frozen=True)
 class InventoryPage:
     """A deterministic keyset-paginated inventory page."""
 
@@ -230,6 +244,57 @@ class InventoryStore:
             zero_stock_sku_count=zero_stock_sku_count,
             low_stock_sku_count=low_stock_sku_count,
             low_stock_at=low_stock_at,
+        )
+
+    def event_summary(self, *, sku: str | None = None) -> EventSummary:
+        """Summarize accepted event volume in one read-consistent snapshot.
+
+        Unit totals are accumulated in Python so multiple valid signed-64-bit
+        deltas cannot overflow SQLite aggregation. ``sold_units`` is reported as
+        a positive magnitude even for the minimum signed-64-bit delta.
+        """
+
+        if sku is not None and (not isinstance(sku, str) or not sku.strip()):
+            raise ValueError("sku must be a non-empty string")
+
+        event_count = 0
+        sku_count = 0
+        previous_sku: str | None = None
+        restock_event_count = 0
+        restocked_units = 0
+        sale_event_count = 0
+        sold_units = 0
+        net_units = 0
+        with closing(sqlite3.connect(self.path)) as db, db:
+            if sku is None:
+                rows = db.execute("SELECT sku, delta FROM events ORDER BY sku")
+            else:
+                rows = db.execute(
+                    "SELECT sku, delta FROM events WHERE sku = ? ORDER BY sku",
+                    (sku,),
+                )
+            for event_sku, delta in rows:
+                event_count += 1
+                if event_sku != previous_sku:
+                    sku_count += 1
+                    previous_sku = event_sku
+                net_units += delta
+                if delta > 0:
+                    restock_event_count += 1
+                    restocked_units += delta
+                else:
+                    sale_event_count += 1
+                    sold_units += -delta
+
+        return EventSummary(
+            event_count=event_count,
+            sku_count=sku_count,
+            restock_event_count=restock_event_count,
+            restocked_units=restocked_units,
+            sale_event_count=sale_event_count,
+            sold_units=sold_units,
+            net_units=net_units,
+            sku=sku,
         )
 
     def event_page(
