@@ -73,6 +73,9 @@ services:
   `MERCHANT_AUDIT_TOKEN` is configured, this route requires its bearer token.
 - `GET /event?event_id=...` returns one immutable event by exact ID, or `404`
   when it is absent. It uses the same optional bearer authentication.
+- `GET /event-summary?sku=...` returns read-consistent accepted-event counts and
+  restock, sale, and net unit volume, globally or for one exact SKU. It uses the
+  same optional bearer authentication and overflow-safe Python accumulation.
 - `GET /inventory?limit=100&after_sku=...&low_stock_at=...` returns the
   operational read model as deterministic JSON and uses the same optional
   bearer authentication.
@@ -135,7 +138,7 @@ curl -s 'http://127.0.0.1:8000/inventory?low_stock_at=5' \
   -H "Authorization: Bearer $MERCHANT_AUDIT_TOKEN"
 ```
 
-With `MERCHANT_AUDIT_TOKEN` set, the four business read routes require the
+With `MERCHANT_AUDIT_TOKEN` set, the five business read routes require the
 exact bearer value in the `Authorization` header. Health, readiness, metrics,
 and signed event ingestion remain outside this optional read-token check. The
 bearer value is compared in constant time, but this local demo still serves
@@ -147,6 +150,12 @@ The inventory summary is a bounded synthetic operational diagnostic, not a
 valuation, availability promise, reorder recommendation, or substitute for a
 warehouse system. Its counts reflect one SQLite read snapshot; the next request
 may differ as new events arrive.
+
+The event summary covers accepted synthetic events over the ledger's full
+history; this schema has no event timestamps, so it is not a time-window trend,
+demand forecast, sales measure, or reorder recommendation. Sale units are the
+positive magnitude of negative inventory deltas, and all fields come from one
+SQLite read snapshot.
 
 Metrics normalize every unknown path to an `unknown` route label instead of
 recording user-controlled path values. They contain no query strings, request

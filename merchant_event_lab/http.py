@@ -272,6 +272,7 @@ class InventoryHTTPApp:
         path = environ.get("PATH_INFO", "")
         admission_required = path in {
             "/event",
+            "/event-summary",
             "/events",
             "/inventory",
             "/inventory-summary",
@@ -297,6 +298,7 @@ class InventoryHTTPApp:
             if path
             in {
                 "/event",
+                "/event-summary",
                 "/events",
                 "/inventory",
                 "/inventory-summary",
@@ -367,6 +369,12 @@ class InventoryHTTPApp:
             if not self._audit_authorized(environ):
                 return self._audit_unauthorized(start_response)
             return self._get_event(environ, start_response)
+        if path == "/event-summary":
+            if method != "GET":
+                return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
+            if not self._audit_authorized(environ):
+                return self._audit_unauthorized(start_response)
+            return self._get_event_summary(environ, start_response)
         if path == "/inventory":
             if method != "GET":
                 return self._respond(start_response, "405 Method Not Allowed", {"error": "method not allowed"}, [("Allow", "GET")])
@@ -594,6 +602,45 @@ class InventoryHTTPApp:
                     for event in page.items
                 ],
                 "next_cursor": page.next_cursor,
+            },
+        )
+
+    def _get_event_summary(
+        self,
+        environ: dict[str, Any],
+        start_response: StartResponse,
+    ) -> Iterable[bytes]:
+        try:
+            query = parse_qs(
+                environ.get("QUERY_STRING", ""),
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=1,
+            )
+            if set(query) - {"sku"} or any(len(values) != 1 for values in query.values()):
+                raise ValueError("sku must be the only optional query parameter")
+            summary = self.store.event_summary(sku=query.get("sku", [None])[0])
+        except ValueError as error:
+            return self._respond(start_response, "400 Bad Request", {"error": str(error)})
+        except sqlite3.Error:
+            return self._respond(
+                start_response,
+                "503 Service Unavailable",
+                {"error": "service unavailable"},
+            )
+
+        return self._respond(
+            start_response,
+            "200 OK",
+            {
+                "event_count": summary.event_count,
+                "net_units": summary.net_units,
+                "restock_event_count": summary.restock_event_count,
+                "restocked_units": summary.restocked_units,
+                "sale_event_count": summary.sale_event_count,
+                "sku": summary.sku,
+                "sku_count": summary.sku_count,
+                "sold_units": summary.sold_units,
             },
         )
 

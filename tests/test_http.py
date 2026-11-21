@@ -367,6 +367,61 @@ class InventoryHTTPAppTests(unittest.TestCase):
             },
         )
 
+    def test_event_summary_endpoint_returns_global_and_sku_volume(self):
+        self.store.apply("restock-a", "alpha", 5)
+        self.store.apply("sale-a", "alpha", -2)
+        self.store.apply("restock-b", "beta", 7)
+
+        status, _, payload = self.request("GET", "/event-summary")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(
+            payload,
+            {
+                "event_count": 3,
+                "net_units": 10,
+                "restock_event_count": 2,
+                "restocked_units": 12,
+                "sale_event_count": 1,
+                "sku": None,
+                "sku_count": 2,
+                "sold_units": 2,
+            },
+        )
+
+        status, _, payload = self.request("GET", "/event-summary", query="sku=alpha")
+        self.assertEqual(status, "200 OK")
+        self.assertEqual(payload["event_count"], 2)
+        self.assertEqual(payload["net_units"], 3)
+        self.assertEqual(payload["sku"], "alpha")
+        self.assertEqual(payload["sku_count"], 1)
+
+    def test_event_summary_endpoint_enforces_query_method_and_auth(self):
+        for query in ("sku=", "unknown=1", "sku=a&sku=b", "sku=a&extra=b"):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    self.request("GET", "/event-summary", query=query)[0],
+                    "400 Bad Request",
+                )
+        status, headers, _ = self.request("POST", "/event-summary")
+        self.assertEqual(status, "405 Method Not Allowed")
+        self.assertEqual(headers["Allow"], "GET")
+
+        self.app = InventoryHTTPApp(
+            self.store,
+            {"current": self.secret},
+            audit_token="audit-secret",
+            clock=lambda: self.now,
+        )
+        self.assertEqual(self.request("GET", "/event-summary")[0], "401 Unauthorized")
+        self.assertEqual(
+            self.request(
+                "GET",
+                "/event-summary",
+                authorization="Bearer audit-secret",
+            )[0],
+            "200 OK",
+        )
+
     def test_event_audit_endpoint_rejects_ambiguous_or_invalid_queries(self):
         for query in ("unknown=1", "limit=1&limit=2", "after_event_id=", "sku="):
             with self.subTest(query=query):
@@ -414,6 +469,7 @@ class InventoryHTTPAppTests(unittest.TestCase):
             ("/inventory-summary", "low_stock_at=2"),
             ("/events", ""),
             ("/event", "event_id=event-a"),
+            ("/event-summary", ""),
         ):
             with self.subTest(path=path):
                 status, headers, payload = self.request("GET", path, query=query)
@@ -513,6 +569,13 @@ class InventoryHTTPAppTests(unittest.TestCase):
         )
         self.assertEqual(headers["X-Request-ID"], "database-failure")
 
+        status, headers, payload = self.request("GET", "/event-summary")
+        self.assertEqual(
+            (status, payload),
+            ("503 Service Unavailable", {"error": "service unavailable"}),
+        )
+        self.assertEqual(headers["X-Request-ID"], "database-failure")
+
         body = b'{"event_id":"restock-1","sku":"demo","delta":4}'
         status, headers, payload = self.post_event(body)
         self.assertEqual(
@@ -520,7 +583,7 @@ class InventoryHTTPAppTests(unittest.TestCase):
             ("503 Service Unavailable", {"error": "service unavailable"}),
         )
         self.assertEqual(headers["X-Request-ID"], "database-failure")
-        self.assertEqual([record["status"] for record in records], [503, 503, 503, 503])
+        self.assertEqual([record["status"] for record in records], [503, 503, 503, 503, 503])
         serialized = json.dumps([payload, *records])
         self.assertNotIn("sqlite", serialized.lower())
         self.assertNotIn(str(self.store.path), serialized)

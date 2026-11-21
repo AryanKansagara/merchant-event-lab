@@ -5,6 +5,7 @@ from pathlib import Path
 
 from merchant_event_lab.inventory import (
     MAX_STOCK,
+    EventSummary,
     InventoryEvent,
     InventoryPosition,
     InventoryStore,
@@ -164,6 +165,40 @@ class InventoryStoreTests(unittest.TestCase):
             with self.subTest(threshold=threshold):
                 with self.assertRaisesRegex(ValueError, "low_stock_at"):
                     self.store.inventory_summary(low_stock_at=threshold)
+
+    def test_event_summary_reports_overflow_safe_volume_and_optional_sku(self):
+        self.store.apply("max-a", "sku-a", MAX_STOCK)
+        self.store.apply("max-b", "sku-b", MAX_STOCK)
+        self.store.apply("sale-a", "sku-a", -MAX_STOCK)
+        self.store.apply("small-a", "sku-a", 3)
+
+        self.assertEqual(
+            self.store.event_summary(),
+            EventSummary(
+                event_count=4,
+                sku_count=2,
+                restock_event_count=3,
+                restocked_units=MAX_STOCK * 2 + 3,
+                sale_event_count=1,
+                sold_units=MAX_STOCK,
+                net_units=MAX_STOCK + 3,
+                sku=None,
+            ),
+        )
+        self.assertEqual(
+            self.store.event_summary(sku="sku-a"),
+            EventSummary(3, 1, 2, MAX_STOCK + 3, 1, MAX_STOCK, 3, "sku-a"),
+        )
+
+    def test_event_summary_handles_empty_results_and_rejects_blank_sku(self):
+        self.assertEqual(
+            self.store.event_summary(sku="missing"),
+            EventSummary(0, 0, 0, 0, 0, 0, 0, "missing"),
+        )
+        for invalid in ("", "   "):
+            with self.subTest(sku=invalid):
+                with self.assertRaisesRegex(ValueError, "non-empty string"):
+                    self.store.event_summary(sku=invalid)
 
     def test_event_page_is_ordered_filtered_and_uses_keyset_cursor(self):
         for event_id, sku, delta in [
